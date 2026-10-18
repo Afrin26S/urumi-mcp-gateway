@@ -1,0 +1,14 @@
+secretName: store-secrets
+
+mariadb:
+  image: mariadb:11.4
+  database: wordpress
+  user: wordpress
+  storage: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

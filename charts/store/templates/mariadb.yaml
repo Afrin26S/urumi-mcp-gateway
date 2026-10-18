@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb                  # other pods reach the database at the DNS name "mariadb"
+spec:
+  selector:
+    app: mariadb                 # send traffic to pods with this label
+  ports:
+    - port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: StatefulSet                # like a Deployment, but for pods that keep data
+metadata:
+  name: mariadb
+spec:
+  serviceName: mariadb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      containers:
+        - name: mariadb
+          image: {{ .Values.mariadb.image }}
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:    # read this value from a Secret instead of writing it here
+                  name: {{ .Values.secretName }}
+                  key: mariadb-root-password
+            - name: MARIADB_DATABASE
+              value: {{ .Values.mariadb.database | quote }}
+            - name: MARIADB_USER
+              value: {{ .Values.mariadb.user | quote }}
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: mariadb-password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql      # where MariaDB keeps its files
+          readinessProbe:                    # "is it ready to receive traffic?"
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:                     # "is it still alive? if not, restart it"
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+{{ toYaml .Values.mariadb.resources | indent 12 }}
+  volumeClaimTemplates:                      # one persistent disk per database pod
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.mariadb.storage }}
