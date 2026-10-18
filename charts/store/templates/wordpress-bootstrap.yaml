@@ -1,0 +1,79 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wordpress-bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade        # run after every install and upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation  # delete the previous run's Job first
+spec:
+  backoffLimit: 6                  # retry up to 6 times before giving up
+  template:
+    spec:
+      restartPolicy: OnFailure     # if the container exits with an error, restart it
+      securityContext:
+        runAsUser: 33              # same user id as WordPress's "www-data", so file ownership matches
+        runAsGroup: 33
+      containers:
+        - name: wpcli
+          image: {{ .Values.wpcli.image }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              cd /var/www/html
+              echo "Waiting for WordPress to create wp-config.php..."
+              until [ -f wp-config.php ]; do sleep 5; done
+
+              if ! wp core is-installed; then
+                wp core install \
+                  --url="$WP_URL" \
+                  --title="$WP_TITLE" \
+                  --admin_user="$WP_ADMIN_USER" \
+                  --admin_password="$WP_ADMIN_PASSWORD" \
+                  --admin_email="$WP_ADMIN_EMAIL" \
+                  --skip-email
+              fi
+
+              wp plugin is-installed woocommerce || wp plugin install woocommerce
+              wp plugin activate woocommerce
+              wp rewrite structure '/%postname%/' --hard
+              wp option update woocommerce_coming_soon no
+              wp option update woocommerce_ship_to_countries disabled
+              wp option update woocommerce_cod_settings '{"enabled":"yes","title":"Cash on delivery"}' --format=json
+              echo "Bootstrap finished."
+          env:
+            - name: HOME
+              value: /tmp                         # WP-CLI needs a writable home for its cache
+            - name: WORDPRESS_DB_HOST
+              value: mariadb
+            - name: WORDPRESS_DB_NAME
+              value: {{ .Values.mariadb.database | quote }}
+            - name: WORDPRESS_DB_USER
+              value: {{ .Values.mariadb.user | quote }}
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: mariadb-password
+            - name: WP_URL
+              value: {{ printf "%s://%s" .Values.ingress.scheme .Values.ingress.host | quote }}
+            - name: WP_TITLE
+              value: {{ .Values.site.title | quote }}
+            - name: WP_ADMIN_USER
+              value: {{ .Values.site.adminUser | quote }}
+            - name: WP_ADMIN_EMAIL
+              value: {{ .Values.site.adminEmail | quote }}
+            - name: WP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: wp-admin-password
+          volumeMounts:
+            - name: wp-files
+              mountPath: /var/www/html
+          resources:
+{{ toYaml .Values.wpcli.resources | indent 12 }}
+      volumes:
+        - name: wp-files
+          persistentVolumeClaim:
+            claimName: wordpress-data      # the SAME disk the WordPress pod uses

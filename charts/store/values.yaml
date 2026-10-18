@@ -12,3 +12,34 @@ mariadb:
     limits:
       cpu: 500m
       memory: 512Mi
+
+wordpress:
+  image: wordpress:7-apache
+  storage: 5Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 384Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+wpcli:
+  image: wordpress:cli
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+
+site:
+  title: Urumi Demo Store
+  adminUser: admin
+  adminEmail: admin@example.com
+
+ingress:
+  className: traefik
+  scheme: http
+  host: store.example.com
