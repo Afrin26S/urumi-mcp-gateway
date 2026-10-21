@@ -1,0 +1,10 @@
+image: demo-mcp:0.1.0
+pullPolicy: IfNotPresent
+tokenSecret: utilities-token
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi
