@@ -40,8 +40,40 @@ spec:
               wp option update woocommerce_coming_soon no
               wp option update woocommerce_ship_to_countries disabled
               wp option update woocommerce_cod_settings '{"enabled":"yes","title":"Cash on delivery"}' --format=json
+              wp option update timezone_string 'Asia/Kolkata'
+              wp eval '
+                global $wpdb;
+                $table = $wpdb->prefix . "woocommerce_api_keys";
+                $key = getenv("WC_CONSUMER_KEY");
+                $secret = getenv("WC_CONSUMER_SECRET");
+                $hash = wc_api_hash($key);
+                $found = $wpdb->get_var($wpdb->prepare("SELECT key_id FROM $table WHERE consumer_key = %s", $hash));
+                if ($found) {
+                  echo "MCP API key already registered\n";
+                } else {
+                  $wpdb->insert($table, array(
+                    "user_id" => 1,
+                    "description" => "mcp-server",
+                    "permissions" => "read_write",
+                    "consumer_key" => $hash,
+                    "consumer_secret" => $secret,
+                    "truncated_key" => substr($key, -7),
+                  ));
+                  echo "MCP API key registered\n";
+                }
+              '
               echo "Bootstrap finished."
           env:
+            - name: WC_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.wcApi.secretName }}
+                  key: consumer-key
+            - name: WC_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.wcApi.secretName }}
+                  key: consumer-secret
             - name: HOME
               value: /tmp                         # WP-CLI needs a writable home for its cache
             - name: WORDPRESS_DB_HOST

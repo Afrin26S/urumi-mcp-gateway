@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: woocommerce-mcp          # the gateway will reach it at http://woocommerce-mcp:8000/mcp
+spec:
+  type: ClusterIP                # internal only; there is deliberately no Ingress for this
+  selector:
+    app: woocommerce-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woocommerce-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: woocommerce-mcp
+  template:
+    metadata:
+      labels:
+        app: woocommerce-mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true       # Kubernetes refuses to start the pod if the image runs as root
+        runAsUser: 10001         # the same id the Dockerfile uses
+      containers:
+        - name: woocommerce-mcp
+          image: {{ .Values.mcp.image }}
+          imagePullPolicy: {{ .Values.mcp.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: WC_BASE_URL
+              value: http://wordpress          # the WordPress Service, by name
+            - name: WC_FORWARD_HTTPS
+              value: "true"
+            - name: WC_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.wcApi.secretName }}
+                  key: consumer-key
+            - name: WC_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.wcApi.secretName }}
+                  key: consumer-secret
+          securityContext:
+            allowPrivilegeEscalation: false    # the process can never gain more rights than it started with
+            capabilities:
+              drop: ["ALL"]                    # remove all special Linux privileges
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+{{ toYaml .Values.mcp.resources | indent 12 }}

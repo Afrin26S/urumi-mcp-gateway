@@ -43,3 +43,17 @@ ingress:
   className: traefik
   scheme: http
   host: store.example.com
+
+mcp:
+  image: woocommerce-mcp:0.1.0
+  pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+wcApi:
+  secretName: woocommerce-api
