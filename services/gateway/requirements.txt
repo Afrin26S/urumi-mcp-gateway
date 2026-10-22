@@ -1,0 +1,8 @@
+mcp==2.3.0
+httpx2==2.16.0
+fastapi
+uvicorn
+python-dotenv
+argon2-cffi
+cryptography
+pyjwt

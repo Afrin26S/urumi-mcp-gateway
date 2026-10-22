@@ -11,6 +11,11 @@ dist/
 .env
 *.local.env
 secrets.local.yaml
-
+# Gateway secrets
+.env
+services/gateway/.env
+*.db
+*.db-wal
+*.db-shm
 # Throwaway test files
 hello.yaml
