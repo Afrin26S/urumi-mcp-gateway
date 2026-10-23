@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gateway-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: gateway
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+spec:
+  replicas: 1                   # SQLite on a ReadWriteOnce volume means exactly one writer
+  strategy:
+    type: Recreate              # stop the old pod before starting the new one, so two never share the volume
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: gateway
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: GATEWAY_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: encryption-key
+            - name: GATEWAY_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: jwt-secret
+            - name: GATEWAY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: admin-password
+            - name: SEED_UTILITIES_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: utilities-token
+            - name: GATEWAY_ADMIN_EMAIL
+              value: {{ .Values.adminEmail | quote }}
+            - name: GATEWAY_COOKIE_SECURE
+              value: {{ .Values.cookieSecure | quote }}
+            - name: GATEWAY_LIST_TIMEOUT
+              value: {{ .Values.timeouts.list | quote }}
+            - name: GATEWAY_CALL_TIMEOUT
+              value: {{ .Values.timeouts.call | quote }}
+            - name: GATEWAY_CACHE_TTL
+              value: {{ .Values.timeouts.cacheTtl | quote }}
+            - name: SEED_WOOCOMMERCE_URL
+              value: {{ .Values.upstreams.woocommerce | quote }}
+            - name: SEED_NOTES_URL
+              value: {{ .Values.upstreams.notes | quote }}
+            - name: SEED_UTILITIES_URL
+              value: {{ .Values.upstreams.utilities | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: gateway-data
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8000

@@ -15,8 +15,7 @@ import security
 
 LIST_TIMEOUT = float(os.getenv("GATEWAY_LIST_TIMEOUT", "5"))
 CALL_TIMEOUT = float(os.getenv("GATEWAY_CALL_TIMEOUT", "10"))
-CACHE_TTL = 20.0  # seconds a server's tool list is reused
-
+CACHE_TTL = float(os.getenv("GATEWAY_CACHE_TTL", "10"))
 _state: dict[str, dict] = {}  # slug -> {"status", "error", "tools", "checked_at"}
 
 
@@ -121,7 +120,8 @@ async def call_gateway_tool(user: dict, name: str, arguments: dict, source: str 
             result = CallToolResult(content=upstream.content, is_error=upstream.is_error)
             if upstream.is_error:
                 outcome = "tool_error"
-                error = next((b.text for b in upstream.content if isinstance(b, TextContent)), None)
+                first_text = next((b.text for b in upstream.content if isinstance(b, TextContent)), "")
+                error = first_text.split("\n", 1)[0][:200] or None  # first line only: later lines may echo the arguments
     except TimeoutError:
         outcome, error = "timeout", f"no answer within {CALL_TIMEOUT:g} s"
         result = _error(f"The '{slug}' server did not answer within {CALL_TIMEOUT:g} seconds.")

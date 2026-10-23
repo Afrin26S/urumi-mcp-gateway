@@ -1,0 +1,24 @@
+image: gateway:0.1.0
+pullPolicy: IfNotPresent
+storage: 1Gi
+secretName: gateway-secrets
+adminEmail: admin@example.com
+cookieSecure: "false"
+timeouts:
+  list: "5"
+  call: "10"
+  cacheTtl: "10"
+upstreams:
+  woocommerce: http://woocommerce-mcp.store.svc.cluster.local:8000/mcp
+  notes: http://notes-mcp.mcp-servers.svc.cluster.local:8000/mcp
+  utilities: http://utilities-mcp.mcp-servers.svc.cluster.local:8000/mcp
+ingress:
+  className: traefik
+  host: gateway.example.com
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
