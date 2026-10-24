@@ -64,30 +64,37 @@ Stop XAMPP Apache, IIS, or another local service using host port 80 before start
 
 The following commands describe a fresh installation. For your existing cluster, do not recreate Secrets or overwrite `values-local.yaml`; inspect current resources first.
 
-### 1. Start the cluster
+### 1. Create the cluster (fresh install only)
 
-From the repository root:
-
-```powershell
-.\scripts\dev.ps1 -Action start
-```
-
-This checks Docker, detects an Apache `httpd` process that may own port 80, starts the `urumi` cluster, waits for Kubernetes to respond, and waits for workloads in `store`, `mcp-servers`, and `gateway`.
-
-Other actions:
+First check whether the cluster already exists:
 
 ```powershell
-.\scripts\dev.ps1 -Action status
-.\scripts\dev.ps1 -Action stop
+k3d cluster list
 ```
 
-`stop` stops the cluster without deleting it. For a fresh environment, the equivalent cluster-creation command is:
+If this is a **fresh clone on a machine that does not already have the `urumi` cluster**, make sure Docker Desktop is running and host ports 80/443 are free, then create it:
 
 ```powershell
 k3d cluster create urumi --agents 1 -p "80:80@loadbalancer" -p "443:443@loadbalancer"
+kubectl wait --for=condition=Ready nodes --all --timeout=180s
 ```
 
-Do not run that if the `urumi` cluster already exists.
+Do **not** run `k3d cluster create` if `urumi` already exists. Continue with namespace/Secret creation, image builds, and Helm installation below.
+
+For an **already-created cluster**, use the helper only after its workloads have been installed at least once:
+
+```powershell
+.\scripts\dev.ps1 -Action start
+.\scripts\dev.ps1 -Action status
+```
+
+The helper starts the existing cluster and waits for workloads in `store`, `mcp-servers`, and `gateway`; it does not create a cluster, create Secrets, build/import images, or install Helm releases. If this is a new installation, complete steps 2–5 first, then use the helper for subsequent start/stop cycles.
+
+`stop` stops the cluster without deleting it:
+
+```powershell
+.\scripts\dev.ps1 -Action stop
+```
 
 ### 2. Create namespaces
 
