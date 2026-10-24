@@ -11,6 +11,7 @@ import config  # noqa: F401
 import db
 import security
 import upstream
+import agent
 
 api = FastAPI(title="MCP Gateway API")
 COOKIE_SECURE = os.getenv("GATEWAY_COOKIE_SECURE", "false").lower() == "true"
@@ -254,3 +255,25 @@ def delete_server(server_id: int, _: dict = Depends(admin_only)):
 @api.get("/audit")
 def audit(limit: int = 100, _: dict = Depends(admin_only)):
     return db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (min(max(limit, 1), 500),))
+
+
+# ---------- chat agent ----------
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]  # the browser may NOT send system or tool messages
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=30)
+
+
+@api.post("/chat")
+async def chat(body: ChatRequest, user: dict = Depends(session_user)):
+    if body.messages[-1].role != "user":
+        raise HTTPException(422, "The last message must come from the user")
+    try:
+        return await agent.run_chat(user, [m.model_dump() for m in body.messages])
+    except agent.ChatNotConfigured:
+        raise HTTPException(503, "Chat is not configured on this server")
+    except agent.LlmError as exc:
+        raise HTTPException(502, f"The language model request failed ({exc})")

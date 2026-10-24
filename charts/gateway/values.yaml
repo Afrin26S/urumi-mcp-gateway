@@ -1,4 +1,4 @@
-image: gateway:0.1.0
+image: gateway:0.2.0
 pullPolicy: IfNotPresent
 storage: 1Gi
 secretName: gateway-secrets
@@ -22,3 +22,15 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+llm:
+  baseUrl: ""
+  model: ""
+  secretName: llm-credentials

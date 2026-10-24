@@ -83,6 +83,16 @@ spec:
               value: {{ .Values.upstreams.notes | quote }}
             - name: SEED_UTILITIES_URL
               value: {{ .Values.upstreams.utilities | quote }}
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llm.secretName }}
+                  key: api-key
+                  optional: true
+            - name: LLM_BASE_URL
+              value: {{ .Values.llm.baseUrl | quote }}
+            - name: LLM_MODEL
+              value: {{ .Values.llm.model | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
