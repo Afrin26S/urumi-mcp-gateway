@@ -27,3 +27,6 @@ llm:
   baseUrl: ""
   model: ""
   secretName: llm-credentials
+
+networkPolicy:
+  enabled: true

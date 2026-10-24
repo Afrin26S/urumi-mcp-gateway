@@ -24,6 +24,7 @@ spec:
       labels:
         app: mariadb
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: mariadb
           image: {{ .Values.mariadb.image }}

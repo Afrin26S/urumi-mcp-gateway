@@ -9,6 +9,7 @@ spec:
   backoffLimit: 6                  # retry up to 6 times before giving up
   template:
     spec:
+      automountServiceAccountToken: false
       restartPolicy: OnFailure     # if the container exits with an error, restart it
       securityContext:
         runAsUser: 33              # same user id as WordPress's "www-data", so file ownership matches

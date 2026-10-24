@@ -24,6 +24,7 @@ spec:
       labels:
         app: utilities-mcp
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

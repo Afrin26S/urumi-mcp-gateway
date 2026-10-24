@@ -35,6 +35,7 @@ spec:
       labels:
         app: wordpress
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: wordpress
           image: {{ .Values.wordpress.image }}

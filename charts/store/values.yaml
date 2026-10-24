@@ -57,3 +57,6 @@ mcp:
 
 wcApi:
   secretName: woocommerce-api
+
+networkPolicy:
+  enabled: true

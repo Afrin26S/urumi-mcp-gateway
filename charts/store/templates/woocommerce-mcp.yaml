@@ -24,6 +24,7 @@ spec:
       labels:
         app: woocommerce-mcp
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true       # Kubernetes refuses to start the pod if the image runs as root
         runAsUser: 10001         # the same id the Dockerfile uses
