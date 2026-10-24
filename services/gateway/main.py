@@ -13,3 +13,10 @@ server = Server("gateway", version="0.1.0", on_list_tools=on_list_tools, on_call
 app = server.streamable_http_app(json_response=True, stateless_http=True, host="0.0.0.0")
 app.add_middleware(McpAuth)
 app.mount("/api", api)
+
+import os  # noqa: E402
+
+from starlette.staticfiles import StaticFiles  # noqa: E402
+
+if os.path.isdir("static"):  # exists in the container image, after the dashboard is built
+    app.mount("/", StaticFiles(directory="static", html=True), name="web")

@@ -1,8 +1,12 @@
 import asyncio
+import ipaddress
 import os
 import re
+import socket
 import sqlite3
+import time
 from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
@@ -38,6 +42,8 @@ def public_user(u: dict) -> dict:
     return {k: u[k] for k in ("id", "email", "name", "role")}
 
 
+_failures: dict[str, list[float]] = {}
+MAX_FAILURES, FAILURE_WINDOW = 5, 600
 class Login(BaseModel):
     email: str
     password: str
@@ -50,9 +56,18 @@ def health():
 
 @api.post("/auth/login")
 def login(body: Login, response: Response):
-    user = db.one("SELECT * FROM users WHERE email = ?", (body.email.strip().lower(),))
+    key = body.email.strip().lower()
+    now = time.time()
+    recent = [t for t in _failures.get(key, []) if now - t < FAILURE_WINDOW]
+    if len(recent) >= MAX_FAILURES:
+        raise HTTPException(429, "Too many failed sign-in attempts. Try again in 10 minutes.")
+    user = db.one("SELECT * FROM users WHERE email = ?", (key,))
     if not user or user["disabled"] or not security.verify_password(user["password_hash"], body.password):
+        if len(_failures) > 5000:
+            _failures.clear()  # bound the memory an attacker can use
+        _failures[key] = [*recent, now]
         raise HTTPException(401, "Wrong email or password")
+    _failures.pop(key, None)
     response.set_cookie("session", security.make_session(user["id"]), httponly=True,
                         samesite="lax", secure=COOKIE_SECURE, max_age=security.SESSION_SECONDS)
     return public_user(user)
@@ -160,6 +175,17 @@ def _check_auth(auth_type: str, header_name: str | None, credential: str | None)
 def _check_url(url: str) -> None:
     if not url.startswith(("http://", "https://")):
         raise HTTPException(422, "url must start with http:// or https://")
+    host = urlparse(url).hostname
+    if not host:
+        raise HTTPException(422, "url has no host")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return  # does not resolve (yet): it will simply show as unreachable
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            raise HTTPException(422, "That address is not allowed (loopback, link-local such as cloud metadata, or reserved)")
 
 
 class NewServer(BaseModel):
@@ -187,21 +213,34 @@ class ServerPatch(BaseModel):
     credential: str | None = None
 
 
-def server_view(row: dict, state: dict) -> dict:
+def server_view(row: dict, state: dict, user: dict) -> dict:
     return {
-        "id": row["id"], "slug": row["slug"], "name": row["name"], "url": row["url"],
-        "auth_type": row["auth_type"], "header_name": row["header_name"],
-        "has_credential": bool(row["credential_enc"]),  # the credential itself is never returned
-        "enabled": bool(row["enabled"]), "status": state["status"], "error": state["error"],
-        "tools": [{"name": f"{row['slug']}__{t.name}", "description": t.description} for t in state["tools"]],
+        "id": row["id"],
+        "slug": row["slug"],
+        "name": row["name"],
+        "url": row["url"],
+        "auth_type": row["auth_type"],
+        "header_name": row["header_name"],
+        "has_credential": bool(row["credential_enc"]),
+        "enabled": bool(row["enabled"]),
+        "status": state["status"],
+        "error": state["error"],
+        "tools": [
+            {
+                "name": f"{row['slug']}__{t.name}",
+                "description": t.description,
+            }
+            for t in state["tools"]
+            if upstream.allowed(user, f"{row['slug']}__{t.name}")
+        ],
     }
 
 
 @api.get("/servers")
-async def list_servers(_: dict = Depends(session_user)):
+async def list_servers(user: dict = Depends(session_user)):
     rows = await asyncio.to_thread(db.query, "SELECT * FROM servers ORDER BY slug")
     states = await upstream.status_for(rows)
-    return [server_view(r, states[r["slug"]]) for r in rows]
+    return [server_view(r, states[r["slug"]], user) for r in rows]
 
 
 @api.post("/servers", status_code=201)

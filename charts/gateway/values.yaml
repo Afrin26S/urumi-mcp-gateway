@@ -1,4 +1,4 @@
-image: gateway:0.2.0
+image: gateway:0.3.0
 pullPolicy: IfNotPresent
 storage: 1Gi
 secretName: gateway-secrets
@@ -15,13 +15,6 @@ upstreams:
 ingress:
   className: traefik
   host: gateway.example.com
-resources:
-  requests:
-    cpu: 100m
-    memory: 192Mi
-  limits:
-    cpu: 500m
-    memory: 512Mi
 resources:
   requests:
     cpu: 100m

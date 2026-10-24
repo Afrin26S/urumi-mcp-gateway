@@ -17,6 +17,19 @@ LIST_TIMEOUT = float(os.getenv("GATEWAY_LIST_TIMEOUT", "5"))
 CALL_TIMEOUT = float(os.getenv("GATEWAY_CALL_TIMEOUT", "10"))
 CACHE_TTL = float(os.getenv("GATEWAY_CACHE_TTL", "10"))
 _state: dict[str, dict] = {}  # slug -> {"status", "error", "tools", "checked_at"}
+RESTRICTED = {
+    t.strip()
+    for t in os.getenv(
+        "GATEWAY_ADMIN_ONLY_TOOLS",
+        "woocommerce__create_product,woocommerce__update_order_status",
+    ).split(",")
+    if t.strip()
+}
+
+
+def allowed(user: dict, tool_name: str) -> bool:
+    """Admins can use all tools; members cannot use restricted tools."""
+    return user["role"] == "admin" or tool_name not in RESTRICTED
 
 
 def _describe(exc: BaseException) -> str:
@@ -94,10 +107,13 @@ async def list_gateway_tools(user: dict) -> list[Tool]:
     for s in servers:
         state = _state.get(s["slug"])
         if not state or state["status"] != "connected":
-            continue  # a dead server contributes nothing, but never breaks the others
+            continue
         for t in state["tools"]:
+            full_name = f"{s['slug']}__{t.name}"
+            if not allowed(user, full_name):
+                continue  # restricted tools are hidden from members
             tools.append(Tool(
-                name=f"{s['slug']}__{t.name}",  # the collision scheme: <server>__<tool>
+                name=full_name,
                 description=f"[{s['name']}] {t.description or ''}".strip(),
                 input_schema=t.input_schema,
             ))
@@ -109,19 +125,23 @@ async def call_gateway_tool(user: dict, name: str, arguments: dict, source: str 
     started = time.perf_counter()
     outcome, error = "success", None
     try:
-        server = await asyncio.to_thread(db.one, "SELECT * FROM servers WHERE slug = ?", (slug,)) if sep else None
-        if server is None or not server["enabled"]:
-            outcome, error = "error", "unknown or disabled tool"
-            result = _error(f"Unknown or disabled tool: {name}")
+        if not allowed(user, name):  # checked BEFORE anything else: hiding a tool is not enough
+            outcome, error = "denied", "tool is restricted to admins"
+            result = _error(f"You are not allowed to use {name}: it is restricted to admins.")
         else:
-            with anyio.fail_after(CALL_TIMEOUT):
-                async with _connect(server) as client:
-                    upstream = await client.call_tool(tool, arguments)
-            result = CallToolResult(content=upstream.content, is_error=upstream.is_error)
-            if upstream.is_error:
-                outcome = "tool_error"
-                first_text = next((b.text for b in upstream.content if isinstance(b, TextContent)), "")
-                error = first_text.split("\n", 1)[0][:200] or None  # first line only: later lines may echo the arguments
+            server = await asyncio.to_thread(db.one, "SELECT * FROM servers WHERE slug = ?", (slug,)) if sep else None
+            if server is None or not server["enabled"]:
+                outcome, error = "error", "unknown or disabled tool"
+                result = _error(f"Unknown or disabled tool: {name}")
+            else:
+                with anyio.fail_after(CALL_TIMEOUT):
+                    async with _connect(server) as client:
+                        upstream = await client.call_tool(tool, arguments)
+                result = CallToolResult(content=upstream.content, is_error=upstream.is_error)
+                if upstream.is_error:
+                    outcome = "tool_error"
+                    first_text = next((b.text for b in upstream.content if isinstance(b, TextContent)), "")
+                    error = first_text.split("\n", 1)[0][:200] or None
     except TimeoutError:
         outcome, error = "timeout", f"no answer within {CALL_TIMEOUT:g} s"
         result = _error(f"The '{slug}' server did not answer within {CALL_TIMEOUT:g} seconds.")
@@ -130,7 +150,7 @@ async def call_gateway_tool(user: dict, name: str, arguments: dict, source: str 
         result = _error(f"The '{slug}' server rejected the call: {exc.message}")
     except Exception as exc:
         outcome, error = "error", _describe(exc)
-        forget(slug)  # re-check this server next time
+        forget(slug)
         result = _error(f"The '{slug}' server could not be reached.")
     duration = int((time.perf_counter() - started) * 1000)
     await asyncio.to_thread(
