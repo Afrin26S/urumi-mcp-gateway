@@ -1,0 +1,32 @@
+# Example only: add and test TLS/cert-manager settings in the ingress templates
+# before exposing this deployment publicly.
+image: gateway:0.3.0 # Replace with a registry-qualified immutable image.
+pullPolicy: IfNotPresent
+storage: 1Gi
+secretName: gateway-secrets
+adminEmail: admin@example.com
+cookieSecure: "true"
+timeouts:
+  list: "5"
+  call: "10"
+  cacheTtl: "10"
+upstreams:
+  woocommerce: http://woocommerce-mcp.store.svc.cluster.local:8000/mcp
+  notes: http://notes-mcp.mcp-servers.svc.cluster.local:8000/mcp
+  utilities: http://utilities-mcp.mcp-servers.svc.cluster.local:8000/mcp
+ingress:
+  className: traefik
+  host: gateway.example.com
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+llm:
+  baseUrl: "https://api.groq.com/openai/v1"
+  model: "openai/gpt-oss-120b"
+  secretName: llm-credentials
+networkPolicy:
+  enabled: true

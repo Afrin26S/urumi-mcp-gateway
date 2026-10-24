@@ -1,0 +1,56 @@
+# Example only: add and test TLS/cert-manager settings in the ingress templates
+# before exposing this deployment publicly.
+secretName: store-secrets
+mariadb:
+  image: mariadb:11.4
+  database: wordpress
+  user: wordpress
+  storage: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+wordpress:
+  image: wordpress:7-apache
+  storage: 5Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 384Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+wpcli:
+  image: wordpress:cli
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+site:
+  title: Urumi Demo Store
+  adminUser: admin
+  adminEmail: admin@example.com
+ingress:
+  className: traefik
+  scheme: https
+  host: store.example.com
+mcp:
+  image: woocommerce-mcp:0.1.0 # Replace with a registry-qualified immutable image.
+  pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+wcApi:
+  secretName: woocommerce-api
+networkPolicy:
+  enabled: true
