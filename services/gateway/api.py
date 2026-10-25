@@ -1,10 +1,12 @@
 import asyncio
 import ipaddress
+import math
 import os
 import re
 import socket
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -266,6 +268,15 @@ def patch_server(server_id: int, body: ServerPatch, _: dict = Depends(admin_only
     changes = body.model_dump(exclude_unset=True)
     if "url" in changes:
         _check_url(changes["url"])
+        if (
+            changes["url"] != row["url"]
+            and row["credential_enc"]
+            and "credential" not in changes
+        ):
+            raise HTTPException(
+                422,
+                "Changing the URL of a server that has a credential requires entering the credential again",
+            )
     if "credential" in changes:
         cred = changes.pop("credential")
         changes["credential_enc"] = security.encrypt(cred) if cred else None
@@ -291,9 +302,70 @@ def delete_server(server_id: int, _: dict = Depends(admin_only)):
 
 
 # ---------- audit log (admin) ----------
-@api.get("/audit")
-def audit(limit: int = 100, _: dict = Depends(admin_only)):
-    return db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (min(max(limit, 1), 500),))
+
+# ---------- metrics (admin) ----------
+@api.get("/metrics")
+async def metrics(hours: int = 24, _: dict = Depends(admin_only)):
+    hours = min(max(hours, 1), 24 * 30)
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=hours)
+    ).isoformat(timespec="seconds")
+
+    servers = await asyncio.to_thread(
+        db.query, "SELECT * FROM servers ORDER BY slug"
+    )
+    states = await upstream.status_for(servers)
+
+    rows = await asyncio.to_thread(
+        db.query,
+        """
+        SELECT server_slug, outcome, duration_ms
+        FROM audit_log
+        WHERE ts >= ? AND server_slug IS NOT NULL
+        """,
+        (cutoff,),
+    )
+
+    by_server: dict[str, list[dict]] = {}
+    for row in rows:
+        by_server.setdefault(row["server_slug"], []).append(row)
+
+    result = []
+
+    for server in servers:
+        calls = by_server.get(server["slug"], [])
+
+        def count(outcome: str) -> int:
+            return sum(1 for call in calls if call["outcome"] == outcome)
+
+        failures = count("tool_error") + count("timeout") + count("error")
+
+        timings = sorted(
+            call["duration_ms"] or 0
+            for call in calls
+            if call["outcome"] != "denied"
+        )
+
+        state = states[server["slug"]]
+
+        result.append({
+            "slug": server["slug"],
+            "name": server["name"],
+            "status": state["status"],
+            "status_reason": state["error"],
+            "calls": len(calls),
+            "success": count("success"),
+            "failures": failures,
+            "denied": count("denied"),
+            "error_rate": round(failures / len(calls), 3) if calls else 0,
+            "avg_ms": round(sum(timings) / len(timings)) if timings else 0,
+            "p95_ms": (
+                timings[max(0, math.ceil(0.95 * len(timings)) - 1)]
+                if timings else 0
+            ),
+        })
+
+    return {"window_hours": hours, "servers": result}
 
 
 # ---------- chat agent ----------

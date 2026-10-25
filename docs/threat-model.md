@@ -77,12 +77,11 @@ Local traffic uses HTTP. A public deployment would require an explicit TLS and a
 
 ### Credential retained after a URL change
 
-**Impact:** If an admin changes the URL for an existing credentialed upstream, a stored credential might be sent to the new destination.
+**Impact:** If a stored credential is silently reused after an upstream URL changes, it could be sent to an unintended destination.
 
-**Current status:** The reviewed server-update code validates the URL, but does not appear to require re-entering the credential when the URL changes.
+**Controls:** Changing the URL of a credentialed upstream requires entering its credential again. A URL-only update was tested through the dashboard and rejected with HTTP 422; the original URL and Bearer-token configuration remained unchanged.
 
-**Next step:** Require the credential to be re-entered when a credentialed server's URL changes. Until implemented and tested, record this as an open security gap.
-
+**Residual risk:** An administrator who knows the upstream credential can still configure another destination and enter that credential again. URL validation and NetworkPolicy/egress restrictions remain important independent controls.
 ### Slow or unavailable upstream
 
 **Impact:** A dead server could block tool discovery or chats.
@@ -150,11 +149,10 @@ Only add claims about other security tests (such as specific SSRF payloads or ev
 
 ## Highest-priority future work
 
-1. Require credential re-entry when an existing credentialed server URL changes.
-2. Complete TLS/cert-manager setup and enable secure cookies.
-3. Require confirmation for consequential chat-initiated writes.
-4. Consider allow-list permissions and per-user rate limits.
-5. Audit management actions; define audit retention and backup/restore procedures.
-6. Tighten gateway egress and test NetworkPolicy enforcement.
-7. Move to PostgreSQL before scaling gateway replicas.
-8. Review WooCommerce authentication/forwarded-HTTPS behavior before handling real customer data.
+1. Complete TLS/cert-manager setup and enable secure cookies.
+2. Require confirmation for consequential chat-initiated writes.
+3. Consider allow-list permissions and per-user rate limits.
+4. Audit management actions; define audit retention and backup/restore procedures.
+5. Tighten gateway egress and test NetworkPolicy enforcement.
+6. Move to PostgreSQL before scaling gateway replicas.
+7. Review WooCommerce authentication/forwarded-HTTPS behavior before handling real customer data.

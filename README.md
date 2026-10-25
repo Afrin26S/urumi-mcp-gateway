@@ -39,20 +39,20 @@ Tools are named `server__tool`, for example `woocommerce__list_orders`, `notes__
 | Store | WordPress, WooCommerce, MariaDB | `wordpress:7-apache`, `mariadb:11.4`; `store` |
 | WooCommerce MCP | Five store tools over WooCommerce REST API | `woocommerce-mcp:0.1.0`; `store` |
 | Demo MCP servers | Notes and Utilities for routing/auth/failure tests | `demo-mcp:0.1.0`; `mcp-servers` |
-| Gateway | MCP endpoint, management API, React dashboard, chat agent | `gateway:0.3.0`; `gateway` |
+| Gateway | MCP endpoint, management API, React dashboard, chat agent | `gateway:0.4.0`; `gateway` |
 
 All three enabled upstreams expose 11 admin-visible tools in the local configuration: Notes (3), Utilities (3), and WooCommerce (5). Members see 9 because `woocommerce__create_product` and `woocommerce__update_order_status` are admin-only.
 
 ## Repository layout
 
-- `charts/store/` — WordPress, WooCommerce, MariaDB, WooCommerce MCP, bootstrap job, NetworkPolicies.
-- `charts/demo-mcp/` — Notes and Utilities deployments and NetworkPolicies.
-- `charts/gateway/` — gateway deployment and NetworkPolicies.
-- `services/woocommerce-mcp/` — WooCommerce MCP server.
-- `services/demo-mcp/` — Notes and Utilities MCP servers.
-- `services/gateway/` — routing, management API, chat agent, security helpers, SQLite schema, smoke test, and dashboard source.
-- `scripts/dev.ps1` — local cluster start/stop/status helper.
-- `docs/` — design decisions and threat model.
+- `charts/store/` â€” WordPress, WooCommerce, MariaDB, WooCommerce MCP, bootstrap job, NetworkPolicies.
+- `charts/demo-mcp/` â€” Notes and Utilities deployments and NetworkPolicies.
+- `charts/gateway/` â€” gateway deployment and NetworkPolicies.
+- `services/woocommerce-mcp/` â€” WooCommerce MCP server.
+- `services/demo-mcp/` â€” Notes and Utilities MCP servers.
+- `services/gateway/` â€” routing, management API, chat agent, security helpers, SQLite schema, smoke test, and dashboard source.
+- `scripts/dev.ps1` â€” local cluster start/stop/status helper.
+- `docs/` â€” design decisions and threat model.
 
 ## Prerequisites
 
@@ -62,7 +62,7 @@ Stop XAMPP Apache, IIS, or another local service using host port 80 before start
 
 ## Local setup
 
-The following commands describe a fresh installation. For your existing cluster, do not recreate Secrets or overwrite `values-local.yaml`; inspect current resources first.
+The following commands describe a fresh installation. If the `urumi` cluster or any Secret already exists, skip that creation step instead of recreating it.
 
 ### 1. Start the cluster
 
@@ -172,8 +172,8 @@ The gateway chart expects `api-key` in `llm-credentials`. Protect the Fernet key
 ```powershell
 docker build -t woocommerce-mcp:0.1.0 .\services\woocommerce-mcp
 docker build -t demo-mcp:0.1.0 .\services\demo-mcp
-docker build -t gateway:0.3.0 .\services\gateway
-k3d image import woocommerce-mcp:0.1.0 demo-mcp:0.1.0 gateway:0.3.0 -c urumi
+docker build -t gateway:0.4.0 .\services\gateway
+k3d image import woocommerce-mcp:0.1.0 demo-mcp:0.1.0 gateway:0.4.0 -c urumi
 ```
 
 ### 5. Install the charts
@@ -199,14 +199,85 @@ The example admin email is `admin@example.com`. Use the password configured for 
 
 `*.localtest.me` normally resolves to loopback, so a hosts-file edit is usually unnecessary. k3d maps host ports 80 and 443 to the load balancer, which forwards traffic to Traefik.
 
+## AWS deployment (EC2 + k3s)
+
+This is the planned AWS deployment path; it is not evidence of a completed
+public deployment. The local Windows/k3d workflow remains the development
+environment. The AWS target is an Ubuntu EC2 instance running k3s, with
+container images stored in private Amazon ECR repositories and workloads
+installed using the existing Helm charts.
+
+### Deployment architecture
+
+- **Compute:** Ubuntu EC2 instance running k3s and Traefik.
+- **Container registry:** Private ECR repositories for `gateway`,
+  `demo-mcp`, and `woocommerce-mcp`.
+- **Workloads:** `store`, `demo-mcp`, and `gateway` Helm releases in their
+  respective namespaces.
+- **State:** Persistent volumes for gateway SQLite, WordPress, and MariaDB.
+- **External access:** A domain and tested TLS configuration before exposing
+  the dashboard or store publicly.
+
+### Before provisioning AWS resources
+
+1. Confirm the AWS account, region, available credits, and budget alerts.
+2. Choose an EC2 instance size that can run WordPress, MariaDB, k3s, and all
+   MCP services together. Validate actual resource use before increasing load.
+3. Create private ECR repositories and push versioned images. Configure the
+   instance to authenticate to ECR using an appropriate IAM role; do not put
+   AWS access keys in the repository or container images.
+4. Generate fresh production secrets. Do not reuse local-demo passwords,
+   API tokens, encryption keys, or database credentials.
+5. Configure persistent storage and a backup/restore plan. Keep the gateway
+   Fernet encryption key backed up separately and securely.
+6. Configure DNS and complete the Ingress TLS/cert-manager work. The current
+   Ingress templates define HTTP routing but do not provision a complete TLS
+   setup. Do not expose the dashboard publicly until HTTPS and secure cookies
+   have been tested.
+
+### Deployment order
+
+1. Provision the EC2 instance, restrict inbound security-group rules, and
+   install and secure k3s.
+2. Configure private ECR access and build/push the three application images
+   with immutable version tags or digests.
+3. Create the `store`, `mcp-servers`, and `gateway` namespaces and provision
+   the required Secrets in their correct namespaces.
+4. Configure the production Helm values with registry-qualified image
+   references, the real gateway hostname, and the intended LLM provider.
+5. Install or upgrade the `store` chart, then `demo-mcp`, then `gateway`.
+   Verify the WordPress bootstrap job completes and all expected pods become
+   ready before testing the gateway.
+6. Verify the storefront, gateway health endpoint, dashboard login, MCP
+   authentication, all three upstreams, audit events, and Metrics.
+7. Configure and verify TLS, HTTPS-only cookies, backups, and recovery
+   procedures before permitting public access.
+
+### Production deployment gates
+
+- The gateway uses SQLite on a ReadWriteOnce volume and must remain a
+  single replica. Do not scale it horizontally without moving state to a
+  shared database and testing migrations.
+- Confirm the storage provisioner, reclaim policy, backup schedule, and
+  restore process. Persistent volumes alone are not backups.
+- Keep database credentials, gateway signing/encryption keys, upstream
+  tokens, and LLM API keys out of Git, shell history, logs, and public output.
+- Verify NetworkPolicies against the actual k3s networking configuration;
+  the presence of policy objects alone does not prove isolation.
+- Review WooCommerce forwarded-HTTPS assumptions, provider data handling,
+  request-rate controls, audit retention, and cost alerts before using real
+  customer data.
+- The `values-prod.yaml` files are starting examples, not ready-to-deploy
+  production configurations. The AWS deployment is complete only after the
+  actual environment passes its deployment and security checks.
 ## Using Urumi
 
 ### Dashboard chat
 
 Example prompts:
-- “What orders came in today?”
-- “Create a product called Test Notebook with a price of 199.”
-- “What is the total of today's orders in rupees?”
+- â€œWhat orders came in today?â€
+- â€œCreate a product called Test Notebook with a price of 199.â€
+- â€œWhat is the total of today's orders in rupees?â€
 
 The last prompt can require WooCommerce and Utilities in the same turn. Inspect the tool trace and structured results when validating totals; the model's natural-language summary can be inaccurate even when a tool returned the correct value.
 
@@ -247,6 +318,8 @@ The script defaults to `http://127.0.0.1:8300/mcp`; set `GATEWAY_URL` to test th
 - All enabled upstreams expose 11 admin-visible tools: 3 Notes, 3 Utilities, and 5 WooCommerce.
 - With Utilities disabled, discovery returned the remaining 8 tools; re-enabling it restored all 11.
 - A revoked API key returned HTTP 401.
+- The admin Metrics page displayed per-upstream call counts, successes, failures, denied calls, error rates, average latency, p95 latency, and connection status from the audit log.
+- Updating a credentialed upstream's URL without re-entering its credential was rejected with HTTP 422; the original URL and Bearer-token configuration remained unchanged.
 - When Notes was scaled to zero, the dashboard reported it unreachable while Utilities and WooCommerce remained connected; restoring Notes recovered it.
 - A member key discovered/called member-permitted tools, and an admin-only write tool was denied to a member and logged.
 - A dashboard chat turn used WooCommerce and Utilities in the same turn for order lookup and currency conversion. A displayed natural-language total did not match the tool's numeric result, so verify important calculations against structured tool output.
@@ -257,7 +330,7 @@ Implemented controls include Argon2 password hashing; SHA-256 hashes for random 
 
 NetworkPolicy templates exist in the store, demo MCP, and gateway charts. Service-account-token automounting is disabled in the pod templates. Gateway, Notes, Utilities, and WooCommerce MCP are configured as non-root (UID 10001), with privilege escalation disabled and Linux capabilities dropped. WordPress and MariaDB also disable service-account token automounting, but retain the runtime users configured by their upstream images.
 
-These controls do not make the demo safe for unrestricted public exposure. The server-update route validates URL changes, but the reviewed code does not require credentials to be re-entered when a credentialed server URL changes. Treat this as a known gap.
+These controls do not make the demo safe for unrestricted public exposure. Changing the URL of a credentialed server requires entering its credential again, and this behavior was verified locally. Administrators who know an upstream credential can still configure that upstream URL, so URL validation and network egress restrictions remain important.
 
 ## Production boundary
 
@@ -270,7 +343,7 @@ The `values-prod.yaml` files are starting examples, not ready-to-deploy producti
 5. Choose an appropriate storage class and test backup/restore.
 6. Do not scale SQLite-backed gateway replicas horizontally without moving state to a shared database such as PostgreSQL.
 7. Add provider-cost controls, rate limits, monitoring, audit retention, and security regression tests.
-8. Address credential reuse after an upstream URL change and review the WooCommerce forwarded-HTTPS assumptions before handling real data.
+8. Review the WooCommerce forwarded-HTTPS assumptions before handling real data.
 
 A VPS deployment, multi-store provisioning, OAuth authorization, and a multi-replica gateway are not claimed as completed.
 
@@ -302,5 +375,4 @@ Stop XAMPP Apache/IIS or another process using port 80, then run `.\scripts\dev.
 
 ## Repository hygiene
 
-Do not commit `.env`, `values-local.yaml`, database files, provider keys, test output containing credentials, `node_modules`, generated `dist`, or temporary backups. Check `git status --short` and stage explicit filenames rather than blindly staging the whole repository.
-
+Do not commit `.env` files, database files (`*.db`), provider keys, test output containing credentials, `node_modules`, generated `dist`, or temporary backups. The `values-local.yaml` file may be committed only after verifying that it contains no credentials or other secrets. Check `git status --short` and stage explicit filenames rather than blindly staging the whole repository.

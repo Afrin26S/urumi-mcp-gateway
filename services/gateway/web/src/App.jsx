@@ -5,6 +5,7 @@ import Keys from "./pages/Keys.jsx";
 import Users from "./pages/Users.jsx";
 import Audit from "./pages/Audit.jsx";
 import Chat from "./pages/Chat.jsx";
+import Metrics from "./pages/Metrics.jsx";
 
 // small line icons (24x24, stroke style), so no icon package is needed
 const ICONS = {
@@ -13,6 +14,7 @@ const ICONS = {
   keys: <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />,
   users: (<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>),
   audit: (<><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></>),
+  metrics: (<><line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" /></>),
   logout: (<><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></>),
 };
 
@@ -71,11 +73,18 @@ export default function App() {
   if (user === null) return <Login onLogin={setUser} />;
 
   const isAdmin = user.role === "admin";
+
   const tabs = [
     ["servers", "Servers", "servers"],
     ["chat", "Chat", "chat"],
     ["keys", "API keys", "keys"],
-    ...(isAdmin ? [["users", "Users", "users"], ["audit", "Audit log", "audit"]] : []),
+    ...(isAdmin
+      ? [
+          ["users", "Users", "users"],
+          ["audit", "Audit log", "audit"],
+          ["metrics", "Metrics", "metrics"],
+        ]
+      : []),
   ];
 
   return (
@@ -105,6 +114,7 @@ export default function App() {
         {tab === "keys" && <Keys user={user} />}
         {tab === "users" && isAdmin && <Users />}
         {tab === "audit" && isAdmin && <Audit />}
+        {tab === "metrics" && isAdmin && <Metrics />}
       </main>
     </div>
   );

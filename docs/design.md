@@ -2,7 +2,7 @@
 
 ## Goals and scope
 
-Urumi provides one MCP endpoint for multiple upstream MCP servers, using WooCommerce as the first data source. It keeps upstream credentials behind the gateway, applies per-user permissions, records tool outcomes, and handles upstream failures without unnecessarily disabling the other servers. It is designed as a team-sized, single-replica demo—not a completed horizontally scaled production service.
+Urumi provides one MCP endpoint for multiple upstream MCP servers, using WooCommerce as the first data source. It keeps upstream credentials behind the gateway, applies per-user permissions, records tool outcomes, and handles upstream failures without unnecessarily disabling the other servers. It is designed as a team-sized, single-replica demoâ€”not a completed horizontally scaled production service.
 
 ## Architecture
 
@@ -42,6 +42,11 @@ The gateway filters these tools from member discovery and enforces restrictions 
 
 MCP API keys and dashboard sessions are separate credentials. API keys are shown once and stored as SHA-256 hashes, with a visible prefix for identification. Random high-entropy API keys differ from human passwords, which are hashed with Argon2. Dashboard authentication uses a signed HttpOnly session cookie, with an eight-hour lifetime and `SameSite=Lax` configured. The local chart uses `cookieSecure: "false"` for HTTP development; production should use HTTPS and set it to `"true"`.
 
+## Credentialed upstream URL changes
+
+When an administrator changes the URL of an upstream that already has a stored credential, the update is rejected unless the credential is entered again. This prevents a URL-only edit from silently carrying the stored credential to a new destination. The rejection was verified locally through the dashboard (HTTP 422).
+
+This is not a substitute for URL validation, network egress restrictions, or administrator trust. An administrator who knows the upstream credential can still configure a different destination and provide that credential again.
 ## Credential storage
 
 Upstream credentials are encrypted with Fernet before being stored in SQLite. The encryption key is supplied through Kubernetes Secret configuration. Credentials are decrypted only for the upstream request and are not returned to the dashboard or MCP client.
@@ -99,7 +104,6 @@ Production requires DNS and TLS, secure cookies, registry-hosted immutable image
 
 ## Known gaps and future work
 
-- Require the upstream credential to be re-entered when changing a credentialed server's URL.
 - Complete TLS/cert-manager configuration.
 - Add confirmation for consequential chat-initiated writes.
 - Consider allow-list permissions and per-user rate limits.

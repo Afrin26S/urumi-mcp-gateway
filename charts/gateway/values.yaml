@@ -1,4 +1,4 @@
-image: gateway:0.3.0
+image: gateway:0.4.0
 pullPolicy: IfNotPresent
 storage: 1Gi
 secretName: gateway-secrets

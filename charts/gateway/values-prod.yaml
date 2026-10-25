@@ -1,6 +1,6 @@
 # Example only: add and test TLS/cert-manager settings in the ingress templates
 # before exposing this deployment publicly.
-image: gateway:0.3.0 # Replace with a registry-qualified immutable image.
+image: gateway:0.4.0 # Replace with a registry-qualified immutable image.
 pullPolicy: IfNotPresent
 storage: 1Gi
 secretName: gateway-secrets
