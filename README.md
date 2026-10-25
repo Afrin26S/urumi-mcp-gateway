@@ -1,378 +1,528 @@
-# Urumi MCP Gateway
+﻿# Urumi MCP Gateway
 
-Urumi is a team MCP gateway on Kubernetes, with WooCommerce as its first data source. An administrator registers upstream MCP servers once; team members use permitted tools through one MCP endpoint or the dashboard chat agent. The gateway owns authentication, authorization, routing, and auditing. Clients do not receive upstream credentials.
+**A Kubernetes-hosted MCP gateway for secure, auditable access to team tools and data sources.**
 
-This repository demonstrates the system on a local k3d cluster. It is not a claim that a public production deployment is complete.
+Urumi gives a team one central place to connect Model Context Protocol (MCP) servers, manage access to their tools, and use those tools through a dashboard chat agent. WooCommerce is the first business data source, supported by two demonstration MCP servers: Notes and Utilities.
 
-- [System design and trade-offs](docs/design.md)
-- [Threat model and residual risks](docs/threat-model.md)
+Instead of giving every client direct access to every upstream server and its credentials, Urumi routes tool calls through a central gateway that handles authentication, authorization, tool discovery, and audit logging.
+
+The project was developed locally on Windows using Docker Desktop and k3d, then deployed to an AWS EC2 instance running Ubuntu 24.04 and k3s.
+
+**Current status:** The AWS demonstration deployment is running and has been tested for tool discovery, cross-server chat, upstream failure and recovery, gateway pod recovery, audit-log persistence, and WooCommerce data persistence after a MariaDB pod restart.
+
+> **Important:** This is a working demonstration deployment, not a production-hardened service. The current public dashboard uses HTTP without TLS. Do not use it for sensitive production data or real customer credentials.
+
+## Table of contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Components](#components)
+- [Technology stack](#technology-stack)
+- [AWS deployment](#aws-deployment)
+- [Verified AWS tests](#verified-aws-tests)
+- [Local development](#local-development)
+- [Security controls](#security-controls)
+- [Operational commands](#operational-commands)
+- [Known limitations and production boundary](#known-limitations-and-production-boundary)
+- [Documentation](#documentation)
+
+## Features
+
+### Centralized MCP access
+
+- Connect multiple upstream MCP servers through one gateway.
+- Discover upstream tools and expose them through a common interface.
+- Route calls to the correct upstream server.
+- Keep upstream server credentials out of MCP clients.
+- Support multiple tool providers, including WooCommerce, Notes, and Utilities.
+
+### Team access and administration
+
+- Authenticate users through the gateway.
+- Apply role-based authorization to administrative and member operations.
+- Associate API keys with users and validate incoming requests.
+- Provide a dashboard for server management, tool discovery, chat, and audit inspection.
+
+### Dashboard chat agent
+
+- Let users interact with available tools through natural-language requests.
+- Allow the chat agent to call tools from different upstream servers when needed.
+- Return results from tool execution in the chat interface.
+
+### Auditing and resilience
+
+- Record tool and gateway activity for inspection.
+- Use timeouts when listing tools and executing upstream calls.
+- Detect upstream connection failures.
+- Allow Kubernetes to recreate failed pods.
+- Persist gateway audit records and store data beyond the lifetime of an individual pod, subject to the current storage configuration.
 
 ## Architecture
 
 ```text
-MCP client (Inspector / compatible client)        Dashboard (React) + chat agent
-       | Authorization: Bearer <user API key>               | session cookie
-       +-------------------------------+---------------------+
-                                       v
-                            Gateway (namespace: gateway)
-                     /mcp, /api, auth, permissions, routing,
-                           timeouts, audit, chat agent
-                                       |
-                 +---------------------+--------------------+
-                 |                     |                    |
-          woocommerce-mcp           notes-mcp          utilities-mcp
-             (store)             (mcp-servers)         (mcp-servers)
-                 |                     |                    |
-          WooCommerce REST          demo tools            demo tools
-                 |
-          WordPress + WooCommerce
-                 |
-              MariaDB
+                         Team members / administrators
+                                      |
+                                      v
+                           Dashboard + Chat Agent
+                                      |
+                                      v
+                              Urumi MCP Gateway
+                         Authentication / Authorization
+                           Tool routing / Audit logging
+                                      |
+                    +-----------------+-----------------+
+                    |                 |                 |
+                    v                 v                 v
+              WooCommerce           Notes            Utilities
+               MCP server         MCP server         MCP server
+                    |                 |                 |
+                    v                 v                 v
+              WordPress +       Demonstration       Currency and
+                MariaDB          search tools       utility tools
+
+                         Kubernetes: k3s on AWS EC2
 ```
 
-Tools are named `server__tool`, for example `woocommerce__list_orders`, `notes__search`, and `utilities__convert_currency`. Prefixing tools avoids collisions between upstreams.
+The diagram represents the logical architecture. The application components run in separate Kubernetes namespaces on the current single-node EC2 cluster.
+
+### Request flow
+
+1. A user accesses the dashboard or sends a request to the gateway.
+2. The gateway authenticates the request and checks the relevant permissions.
+3. The gateway discovers or routes to the appropriate upstream MCP tool.
+4. The selected upstream executes the operation and returns its result.
+5. The gateway returns the result to the client and records relevant activity for audit inspection.
+
+For a cross-server request, the chat agent may invoke more than one upstream tool before responding.
 
 ## Components
 
 | Component | Purpose | Image / namespace |
 |---|---|---|
-| Store | WordPress, WooCommerce, MariaDB | `wordpress:7-apache`, `mariadb:11.4`; `store` |
-| WooCommerce MCP | Five store tools over WooCommerce REST API | `woocommerce-mcp:0.1.0`; `store` |
-| Demo MCP servers | Notes and Utilities for routing/auth/failure tests | `demo-mcp:0.1.0`; `mcp-servers` |
-| Gateway | MCP endpoint, management API, React dashboard, chat agent | `gateway:0.4.0`; `gateway` |
+| Urumi Gateway | MCP endpoint, management API, dashboard, chat agent, and audit log | `gateway:0.4.1` / `gateway` |
+| WooCommerce MCP | Exposes store operations through MCP tools | `woocommerce-mcp:0.1.0` / `store` |
+| Notes MCP | Demonstration upstream with search functionality | `demo-mcp:0.1.0` / `mcp-servers` |
+| Utilities MCP | Demonstration utility tools, including currency conversion | `demo-mcp:0.1.0` / `mcp-servers` |
+| WordPress | Store application and WooCommerce interface | `wordpress:7-apache` / `store` |
+| MariaDB | Persistent store database | `mariadb:11.4` / `store` |
 
-All three enabled upstreams expose 11 admin-visible tools in the local configuration: Notes (3), Utilities (3), and WooCommerce (5). Members see 9 because `woocommerce__create_product` and `woocommerce__update_order_status` are admin-only.
+The demonstration servers share the `demo-mcp:0.1.0` image tag in this deployment. Their configured tools and runtime instances are separate.
 
-## Repository layout
+## Technology stack
 
-- `charts/store/` â€” WordPress, WooCommerce, MariaDB, WooCommerce MCP, bootstrap job, NetworkPolicies.
-- `charts/demo-mcp/` â€” Notes and Utilities deployments and NetworkPolicies.
-- `charts/gateway/` â€” gateway deployment and NetworkPolicies.
-- `services/woocommerce-mcp/` â€” WooCommerce MCP server.
-- `services/demo-mcp/` â€” Notes and Utilities MCP servers.
-- `services/gateway/` â€” routing, management API, chat agent, security helpers, SQLite schema, smoke test, and dashboard source.
-- `scripts/dev.ps1` â€” local cluster start/stop/status helper.
-- `docs/` â€” design decisions and threat model.
+| Area | Technology |
+|---|---|
+| Backend and MCP | Python, MCP SDK, FastAPI |
+| Frontend | React, Vite |
+| Containerization | Docker |
+| Orchestration | Kubernetes with k3s |
+| Packaging | Helm |
+| Store integration | WordPress, WooCommerce, MariaDB |
+| Gateway persistence | SQLite on a persistent volume |
+| Cloud hosting | AWS EC2 |
+| Ingress | Traefik |
+| Source control | Git and GitHub |
 
-## Prerequisites
+## AWS deployment
 
-The local workflow uses Windows PowerShell, Docker Desktop, k3d, `kubectl`, Helm, Git, and Python for the optional smoke test. Node/npm is only needed when developing the frontend separately; the gateway Docker build packages the dashboard.
+Urumi is deployed on an AWS EC2 instance running Ubuntu 24.04 and k3s.
 
-Stop XAMPP Apache, IIS, or another local service using host port 80 before starting the cluster.
+### Deployment configuration
 
-## Local setup
+| Setting | Current deployment |
+|---|---|
+| Cloud provider | AWS |
+| Region | `us-east-1` |
+| EC2 instance type | `t3.medium` |
+| Operating system | Ubuntu 24.04 |
+| Kubernetes distribution | k3s |
+| k3s version | `v1.36.5+k3s1` |
+| Ingress controller | Traefik |
+| Gateway image | `gateway:0.4.1` |
+| Gateway namespace | `gateway` |
+| Store namespace | `store` |
+| Demo upstream namespace | `mcp-servers` |
+| Gateway persistence | SQLite backed by a persistent volume |
+| Store persistence | MariaDB and WordPress persistent volumes |
+| Container image delivery | Images imported into the k3s container runtime |
+| Public gateway transport | HTTP; TLS is not configured |
 
-The following commands describe a fresh installation. If the `urumi` cluster or any Secret already exists, skip that creation step instead of recreating it.
+### Live dashboard
 
-### 1. Start the cluster
+**[Open the Urumi Gateway Dashboard](http://gateway.54.235.55.63.nip.io/)**
 
-From the repository root:
+The current gateway hostname is:
 
-```powershell
-.\scripts\dev.ps1 -Action start
+`gateway.54.235.55.63.nip.io`
+
+This hostname uses nip.io to resolve to the EC2 public IP. It depends on the current IP address and may stop working if that address changes. The deployment currently uses HTTP rather than HTTPS.
+
+### Kubernetes namespaces
+
+- `gateway` — Urumi gateway and its persistent data.
+- `store` — WordPress, WooCommerce MCP, MariaDB, and related workloads.
+- `mcp-servers` — Notes and Utilities demonstration MCP servers.
+
+### Accessing the cluster
+
+Connect to the EC2 instance over SSH using your configured SSH key, then use the k3s-managed Kubernetes CLI.
+
+Check the Kubernetes version:
+
+```bash
+sudo k3s --version
 ```
 
-This checks Docker, detects an Apache `httpd` process that may own port 80, starts the `urumi` cluster, waits for Kubernetes to respond, and waits for workloads in `store`, `mcp-servers`, and `gateway`.
+List the cluster nodes:
 
-Other actions:
-
-```powershell
-.\scripts\dev.ps1 -Action status
-.\scripts\dev.ps1 -Action stop
+```bash
+sudo k3s kubectl get nodes -o wide
 ```
 
-`stop` stops the cluster without deleting it. For a fresh environment, the equivalent cluster-creation command is:
+List workloads across namespaces:
 
-```powershell
-k3d cluster create urumi --agents 1 -p "80:80@loadbalancer" -p "443:443@loadbalancer"
+```bash
+sudo k3s kubectl get pods -A
 ```
 
-Do not run that if the `urumi` cluster already exists.
+Inspect the ingress configuration:
 
-### 2. Create namespaces
-
-```powershell
-kubectl create namespace store
-kubectl create namespace mcp-servers
-kubectl create namespace gateway
+```bash
+sudo k3s kubectl get ingress -A -o wide
 ```
 
-If a namespace already exists, continue rather than deleting it.
+Inspect the gateway deployment:
 
-### 3. Create required Secrets
-
-Do not commit secret values or paste them into chat. These key names are confirmed by the current chart templates. On an already-running cluster, inspect existing secrets first and do not replace them casually.
-
-```powershell
-function New-Pass {
-    $b = New-Object byte[] 18
-    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
-    [Convert]::ToBase64String($b).Replace('+','A').Replace('/','B')
-}
-function New-Hex($n) {
-    $b = New-Object byte[] $n
-    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
-    -join ($b | ForEach-Object { $_.ToString("x2") })
-}
-function New-FernetKey {
-    $b = New-Object byte[] 32
-    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
-    [Convert]::ToBase64String($b).Replace('+','-').Replace('/','_')
-}
-
-$secure = Read-Host "Choose the gateway admin password" -AsSecureString
-$adminPassword = [System.Net.NetworkCredential]::new("", $secure).Password
-$utilitiesToken = New-Hex 24
-$rootPassword = New-Pass
-$dbPassword = New-Pass
-$wpPassword = New-Pass
-$consumerKey = "ck_$(New-Hex 20)"
-$consumerSecret = "cs_$(New-Hex 20)"
-
-kubectl create secret generic store-secrets -n store `
-  "--from-literal=mariadb-root-password=$rootPassword" `
-  "--from-literal=mariadb-password=$dbPassword" `
-  "--from-literal=wp-admin-password=$wpPassword"
-
-kubectl create secret generic woocommerce-api -n store `
-  "--from-literal=consumer-key=$consumerKey" `
-  "--from-literal=consumer-secret=$consumerSecret"
-
-kubectl create secret generic utilities-token -n mcp-servers `
-  "--from-literal=token=$utilitiesToken"
-
-kubectl create secret generic gateway-secrets -n gateway `
-  "--from-literal=encryption-key=$(New-FernetKey)" `
-  "--from-literal=jwt-secret=$(New-Hex 32)" `
-  "--from-literal=admin-password=$adminPassword" `
-  "--from-literal=utilities-token=$utilitiesToken"
+```bash
+sudo k3s kubectl get deployment -n gateway
 ```
 
-For the dashboard chat agent, create the LLM secret only when configuring a provider:
+Check persistent volume claims:
 
-```powershell
-$secureLlm = Read-Host "LLM provider API key" -AsSecureString
-$llmKey = [System.Net.NetworkCredential]::new("", $secureLlm).Password
-kubectl create secret generic llm-credentials -n gateway "--from-literal=api-key=$llmKey"
-$llmKey = $null
+```bash
+sudo k3s kubectl get pvc -A
 ```
 
-The gateway chart expects `api-key` in `llm-credentials`. Protect the Fernet key separately from database backups; losing the key makes stored upstream credentials unreadable. These are local-demo instructions, not a complete production secret-management design.
+These commands inspect the existing deployment; they do not create or modify infrastructure.
 
-| Secret | Namespace | Keys |
-|---|---|---|
-| `store-secrets` | `store` | `mariadb-root-password`, `mariadb-password`, `wp-admin-password` |
-| `woocommerce-api` | `store` | `consumer-key`, `consumer-secret` |
-| `utilities-token` | `mcp-servers` | `token` |
-| `gateway-secrets` | `gateway` | `encryption-key`, `jwt-secret`, `admin-password`, `utilities-token` |
-| `llm-credentials` | `gateway` | `api-key` |
+### Image delivery and deployment approach
 
-### 4. Build and import images
+Application images are imported into the k3s container runtime for this demonstration. The current setup does not rely on Amazon Elastic Container Registry (ECR) to pull these images.
 
-```powershell
-docker build -t woocommerce-mcp:0.1.0 .\services\woocommerce-mcp
-docker build -t demo-mcp:0.1.0 .\services\demo-mcp
-docker build -t gateway:0.4.0 .\services\gateway
-k3d image import woocommerce-mcp:0.1.0 demo-mcp:0.1.0 gateway:0.4.0 -c urumi
+Helm is used to manage the Kubernetes application configuration. Because the cluster is administered through k3s, the Helm command may need the k3s kubeconfig explicitly:
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -A
 ```
 
-### 5. Install the charts
+The exact chart paths and deployment-specific values should be taken from the checked-in Helm charts and the configuration used for the current installation. Do not assume that rebuilding or importing an image automatically updates a running deployment; the workload must be updated through its configured deployment process.
 
-```powershell
-helm upgrade --install store .\charts\store -n store --create-namespace -f .\charts\store\values-local.yaml
-helm upgrade --install demo-mcp .\charts\demo-mcp -n mcp-servers --create-namespace
-helm upgrade --install gateway .\charts\gateway -n gateway --create-namespace -f .\charts\gateway\values-local.yaml
+## Verified AWS tests
+
+The following behaviours were exercised against the deployed AWS environment.
+
+### 1. All three upstream MCP servers connected
+
+The dashboard showed the following tool counts:
+
+| Upstream | Tools |
+|---|---:|
+| Notes | 3 |
+| Utilities | 3 |
+| WooCommerce | 5 |
+| **Total** | **11** |
+
+This verifies that the gateway could connect to the three configured upstream servers and discover their tools.
+
+### 2. Cross-server chat and tool routing
+
+A request asked the chat agent for the day's order total in rupees.
+
+The observed tool sequence was:
+
+1. `woocommerce__list_orders` retrieved a demo order with a total of USD 250.
+2. `utilities__convert_currency` was called with `amount: 250`, `from_currency: "USD"`, and `to_currency: "INR"`.
+3. The Utilities tool returned `22000`, and the chat agent presented the result as **₹22,000**.
+
+This demonstrates a request that used both the WooCommerce and Utilities upstreams.
+
+The returned conversion is the result of the configured Utilities tool. It was not independently verified as a live foreign-exchange rate.
+
+### 3. Upstream failure and recovery
+
+Notes was scaled down to zero replicas to simulate an unavailable upstream.
+
+Observed behaviour:
+
+- The dashboard reported Notes as unreachable.
+- Notes exposed zero available tools while unavailable.
+- Utilities and WooCommerce remained connected.
+- Restoring Notes to one replica returned the dashboard to three connected upstreams and 11 tools.
+
+This verifies the tested failure and recovery behaviour for Notes.
+
+### 4. Gateway pod recovery and audit persistence
+
+The gateway pod was deleted to test Kubernetes recovery.
+
+Observed behaviour:
+
+- Kubernetes created a replacement gateway pod.
+- The replacement pod reached the `Running` and ready state.
+- Previously recorded audit entries were still visible in the dashboard.
+
+This verifies recovery after gateway pod replacement and persistence of the audit records observed in the test.
+
+### 5. Store database pod recovery and data persistence
+
+The MariaDB pod `mariadb-0` was deleted to test pod recovery.
+
+Observed behaviour:
+
+- Kubernetes recreated the MariaDB pod.
+- WordPress and WooCommerce MCP remained running.
+- The existing WooCommerce product list was still available after recovery.
+
+The test returned five products:
+
+| Product | Demo price |
+|---|---:|
+| Daydream Tote Bag | 350 |
+| Cutesy Latte Mug ☕ | 250 |
+| Mouse & Keyboard Set | 699 |
+| Premium Water Bottle | 399 |
+| Urumi Demo Notebook | 199 |
+
+These are demonstration store values; the currency and formatting depend on the configured WooCommerce store.
+
+### 6. Order retrieval
+
+The `woocommerce__list_orders` tool successfully retrieved a demo order, including its order ID, status, source currency, amount, and line item.
+
+This verifies that the gateway could route an order retrieval request to the WooCommerce upstream and return the result to the chat agent.
+
+### What these tests establish
+
+The tests establish that the deployed demonstration can discover tools, route calls across upstream servers, respond to a tested upstream outage, recover Kubernetes-managed pods, and retain the specific data checked after pod replacement.
+
+They do **not** establish high availability, disaster recovery, backup restoration, resistance to every security threat, production scalability, or uninterrupted public availability.
+
+## Local development
+
+The project was developed on Windows using Docker Desktop, Git, k3d, kubectl, and Helm.
+
+### Prerequisites
+
+Install and configure:
+
+- Git
+- Docker Desktop
+- kubectl
+- k3d
+- Helm
+- Python, for the backend and MCP services
+- Node.js and npm, for the frontend
+
+The precise Python and Node.js versions should match the requirements in the relevant project files.
+
+### Clone the repository
+
+```bash
+git clone https://github.com/Afrin26S/urumi-mcp-gateway.git
+cd urumi-mcp-gateway
+```
+
+### Inspect the repository
+
+```bash
+git status
+```
+
+Review the project structure and its setup instructions before starting services. In particular, check the frontend, gateway service, MCP server implementations, Helm charts, and configuration files.
+
+### Local Kubernetes environment
+
+The local development environment uses Docker Desktop and k3d. The `urumi` cluster was used for local testing.
+
+Check whether the cluster exists:
+
+```bash
+k3d cluster list
+```
+
+Inspect the Kubernetes context:
+
+```bash
+kubectl config current-context
+```
+
+If the `urumi` cluster has already been created and is running, inspect its workloads with:
+
+```bash
 kubectl get pods -A
-kubectl get networkpolicy -A
 ```
 
-The first store install can take a few minutes because a bootstrap job configures WordPress/WooCommerce and the API integration. Long-running workloads should become ready; the bootstrap pod should finish with `Completed`.
+Do not recreate an existing cluster or delete persistent volumes unless you intend to reset the environment.
 
-### 6. Open the application
+### Configuration and secrets
 
-- Storefront: <http://store.localtest.me>
-- Gateway dashboard: <http://gateway.localtest.me>
-- API docs: <http://gateway.localtest.me/api/docs>
-- MCP endpoint: `http://gateway.localtest.me/mcp`
+Use the configuration templates and instructions included in the repository. Supply local secrets through environment variables, Kubernetes Secrets, or the documented development setup.
 
-The example admin email is `admin@example.com`. Use the password configured for this cluster; do not assume a default password.
+Do not commit:
 
-`*.localtest.me` normally resolves to loopback, so a hosts-file edit is usually unnecessary. k3d maps host ports 80 and 443 to the load balancer, which forwards traffic to Traefik.
+- `.env` files containing real credentials
+- API keys, access tokens, or passwords
+- Private SSH keys
+- Database dumps containing sensitive data
+- Production secrets or encryption keys
 
-## AWS deployment (EC2 + k3s)
+The local environment and AWS deployment have different network addresses and configuration. Do not copy local endpoint URLs into the AWS configuration without checking the target environment.
 
-This is the planned AWS deployment path; it is not evidence of a completed
-public deployment. The local Windows/k3d workflow remains the development
-environment. The AWS target is an Ubuntu EC2 instance running k3s, with
-container images stored in private Amazon ECR repositories and workloads
-installed using the existing Helm charts.
+## Security controls
 
-### Deployment architecture
+The gateway implementation includes security controls intended to reduce the risk of unauthorized access and unsafe upstream calls. These describe implementation-level protections and should not be interpreted as proof that every control has undergone an independent security audit.
 
-- **Compute:** Ubuntu EC2 instance running k3s and Traefik.
-- **Container registry:** Private ECR repositories for `gateway`,
-  `demo-mcp`, and `woocommerce-mcp`.
-- **Workloads:** `store`, `demo-mcp`, and `gateway` Helm releases in their
-  respective namespaces.
-- **State:** Persistent volumes for gateway SQLite, WordPress, and MariaDB.
-- **External access:** A domain and tested TLS configuration before exposing
-  the dashboard or store publicly.
+The implementation includes:
 
-### Before provisioning AWS resources
+- **Authentication:** User authentication and signed, HTTP-only session cookies.
+- **Password storage:** Argon2 password hashing.
+- **API key handling:** SHA-256 hashes for stored API keys and user-associated key ownership.
+- **Authorization:** Role-based checks for administrative and member operations.
+- **Upstream credentials:** Fernet-based encryption for stored upstream credentials.
+- **Auditability:** Audit records for relevant gateway activity.
+- **Timeouts:** Separate timeout limits for upstream tool listing and tool execution.
+- **Caching:** A short-lived tool-listing cache to reduce repeated discovery requests.
+- **Upstream URL validation:** Validation intended to block unsafe destinations, including loopback, link-local, unspecified, multicast, and reserved addresses.
+- **Login throttling:** A limit after repeated failed login attempts.
+- **Kubernetes hardening:** Deployment configuration includes non-root execution, dropped Linux capabilities, disabled service-account token automounting, and NetworkPolicy templates.
 
-1. Confirm the AWS account, region, available credits, and budget alerts.
-2. Choose an EC2 instance size that can run WordPress, MariaDB, k3s, and all
-   MCP services together. Validate actual resource use before increasing load.
-3. Create private ECR repositories and push versioned images. Configure the
-   instance to authenticate to ECR using an appropriate IAM role; do not put
-   AWS access keys in the repository or container images.
-4. Generate fresh production secrets. Do not reuse local-demo passwords,
-   API tokens, encryption keys, or database credentials.
-5. Configure persistent storage and a backup/restore plan. Keep the gateway
-   Fernet encryption key backed up separately and securely.
-6. Configure DNS and complete the Ingress TLS/cert-manager work. The current
-   Ingress templates define HTTP routing but do not provision a complete TLS
-   setup. Do not expose the dashboard publicly until HTTPS and secure cookies
-   have been tested.
+These protections do not eliminate all risk. In particular, URL validation alone does not guarantee protection against every SSRF scenario, and NetworkPolicy templates only provide protection when they are correctly applied and supported by the cluster networking configuration.
 
-### Deployment order
+## Operational commands
 
-1. Provision the EC2 instance, restrict inbound security-group rules, and
-   install and secure k3s.
-2. Configure private ECR access and build/push the three application images
-   with immutable version tags or digests.
-3. Create the `store`, `mcp-servers`, and `gateway` namespaces and provision
-   the required Secrets in their correct namespaces.
-4. Configure the production Helm values with registry-qualified image
-   references, the real gateway hostname, and the intended LLM provider.
-5. Install or upgrade the `store` chart, then `demo-mcp`, then `gateway`.
-   Verify the WordPress bootstrap job completes and all expected pods become
-   ready before testing the gateway.
-6. Verify the storefront, gateway health endpoint, dashboard login, MCP
-   authentication, all three upstreams, audit events, and Metrics.
-7. Configure and verify TLS, HTTPS-only cookies, backups, and recovery
-   procedures before permitting public access.
+Run the following commands on the EC2 instance over SSH.
 
-### Production deployment gates
+### Inspect pods
 
-- The gateway uses SQLite on a ReadWriteOnce volume and must remain a
-  single replica. Do not scale it horizontally without moving state to a
-  shared database and testing migrations.
-- Confirm the storage provisioner, reclaim policy, backup schedule, and
-  restore process. Persistent volumes alone are not backups.
-- Keep database credentials, gateway signing/encryption keys, upstream
-  tokens, and LLM API keys out of Git, shell history, logs, and public output.
-- Verify NetworkPolicies against the actual k3s networking configuration;
-  the presence of policy objects alone does not prove isolation.
-- Review WooCommerce forwarded-HTTPS assumptions, provider data handling,
-  request-rate controls, audit retention, and cost alerts before using real
-  customer data.
-- The `values-prod.yaml` files are starting examples, not ready-to-deploy
-  production configurations. The AWS deployment is complete only after the
-  actual environment passes its deployment and security checks.
-## Using Urumi
-
-### Dashboard chat
-
-Example prompts:
-- â€œWhat orders came in today?â€
-- â€œCreate a product called Test Notebook with a price of 199.â€
-- â€œWhat is the total of today's orders in rupees?â€
-
-The last prompt can require WooCommerce and Utilities in the same turn. Inspect the tool trace and structured results when validating totals; the model's natural-language summary can be inaccurate even when a tool returned the correct value.
-
-### External MCP client
-
-Create an API key in the dashboard and copy it when shown. Configure a compatible MCP client with:
-
-- URL: `http://gateway.localtest.me/mcp`
-- Header: `Authorization: Bearer <your-api-key>`
-
-MCP Inspector can list and call tools, but does not itself provide a model for natural-language orchestration. Use a model-enabled client to test prompt-driven multi-tool orchestration outside the dashboard.
-
-Treat the API key like a password. Revoke it when no longer needed. Do not expose the local HTTP endpoint publicly.
-
-## Smoke test
-
-The smoke test reads `GATEWAY_KEY` and `GATEWAY_URL`. In PowerShell:
-
-```powershell
-cd .\services\gateway
-$env:GATEWAY_URL = "http://gateway.localtest.me/mcp"
-$secureKey = Read-Host "Enter an active gateway API key" -AsSecureString
-$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
-try {
-    $env:GATEWAY_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-}
-finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-}
-python smoke_test.py
-Remove-Item Env:GATEWAY_KEY
+```bash
+sudo k3s kubectl get pods -A -o wide
 ```
 
-The script defaults to `http://127.0.0.1:8300/mcp`; set `GATEWAY_URL` to test through ingress. A `401` from `/mcp` without a key is expected and confirms the request reached the gateway.
+### Inspect deployments
 
-### Verified local results
-
-- All enabled upstreams expose 11 admin-visible tools: 3 Notes, 3 Utilities, and 5 WooCommerce.
-- With Utilities disabled, discovery returned the remaining 8 tools; re-enabling it restored all 11.
-- A revoked API key returned HTTP 401.
-- The admin Metrics page displayed per-upstream call counts, successes, failures, denied calls, error rates, average latency, p95 latency, and connection status from the audit log.
-- Updating a credentialed upstream's URL without re-entering its credential was rejected with HTTP 422; the original URL and Bearer-token configuration remained unchanged.
-- When Notes was scaled to zero, the dashboard reported it unreachable while Utilities and WooCommerce remained connected; restoring Notes recovered it.
-- A member key discovered/called member-permitted tools, and an admin-only write tool was denied to a member and logged.
-- A dashboard chat turn used WooCommerce and Utilities in the same turn for order lookup and currency conversion. A displayed natural-language total did not match the tool's numeric result, so verify important calculations against structured tool output.
-
-## Security controls and limitations
-
-Implemented controls include Argon2 password hashing; SHA-256 hashes for random API keys; signed HttpOnly dashboard sessions with an eight-hour lifetime; per-user key ownership checks; admin/member authorization; admin-only tool filtering and call-time enforcement; Fernet encryption of upstream credentials; audit records for tool outcomes; 5-second list and 10-second call timeouts; a 10-second listing cache; upstream URL validation against loopback, link-local, unspecified, multicast, and reserved addresses; and login throttling after five failures in ten minutes.
-
-NetworkPolicy templates exist in the store, demo MCP, and gateway charts. Service-account-token automounting is disabled in the pod templates. Gateway, Notes, Utilities, and WooCommerce MCP are configured as non-root (UID 10001), with privilege escalation disabled and Linux capabilities dropped. WordPress and MariaDB also disable service-account token automounting, but retain the runtime users configured by their upstream images.
-
-These controls do not make the demo safe for unrestricted public exposure. Changing the URL of a credentialed server requires entering its credential again, and this behavior was verified locally. Administrators who know an upstream credential can still configure that upstream URL, so URL validation and network egress restrictions remain important.
-
-## Production boundary
-
-The `values-prod.yaml` files are starting examples, not ready-to-deploy production configs. Before public exposure:
-
-1. Configure real DNS and add/test TLS and cert-manager settings in the ingress templates; the current templates do not provision a complete certificate setup.
-2. Set `cookieSecure: "true"` when serving the dashboard exclusively through HTTPS.
-3. Use a registry and immutable image tags/digests.
-4. Provision Secrets safely and restrict Kubernetes access.
-5. Choose an appropriate storage class and test backup/restore.
-6. Do not scale SQLite-backed gateway replicas horizontally without moving state to a shared database such as PostgreSQL.
-7. Add provider-cost controls, rate limits, monitoring, audit retention, and security regression tests.
-8. Review the WooCommerce forwarded-HTTPS assumptions before handling real data.
-
-A VPS deployment, multi-store provisioning, OAuth authorization, and a multi-replica gateway are not claimed as completed.
-
-## Troubleshooting
-
-**Smoke test reports `ConnectError: All connection attempts failed`**
-
-```powershell
-$env:GATEWAY_URL = "http://gateway.localtest.me/mcp"
-curl.exe -i http://gateway.localtest.me/api/docs
-curl.exe -i http://gateway.localtest.me/mcp
+```bash
+sudo k3s kubectl get deployments -A
 ```
 
-A `401` on `/mcp` without a key is expected.
+### Inspect services and ingress
 
-**An upstream is unreachable**
-
-```powershell
-kubectl get pods -A
-kubectl logs deployment/gateway -n gateway
-kubectl get networkpolicy -A
+```bash
+sudo k3s kubectl get svc -A
 ```
 
-Check the upstream pod, dashboard error, and policy selectors before changing configuration.
+```bash
+sudo k3s kubectl get ingress -A -o wide
+```
 
-**Port 80 is busy**
+### Check gateway logs
 
-Stop XAMPP Apache/IIS or another process using port 80, then run `.\scripts\dev.ps1 -Action start`.
+```bash
+sudo k3s kubectl logs -n gateway deployment/gateway --tail=100
+```
 
-## Repository hygiene
+To follow the logs live:
 
-Do not commit `.env` files, database files (`*.db`), provider keys, test output containing credentials, `node_modules`, generated `dist`, or temporary backups. The `values-local.yaml` file may be committed only after verifying that it contains no credentials or other secrets. Check `git status --short` and stage explicit filenames rather than blindly staging the whole repository.
+```bash
+sudo k3s kubectl logs -n gateway deployment/gateway -f
+```
+
+Press `Ctrl+C` to stop following the logs.
+
+### Check gateway events
+
+```bash
+sudo k3s kubectl get events -n gateway --sort-by=.metadata.creationTimestamp
+```
+
+### Inspect persistent storage
+
+```bash
+sudo k3s kubectl get pvc -A
+```
+
+```bash
+sudo k3s kubectl get pv
+```
+
+### Check Helm releases
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -A
+```
+
+### Check the gateway rollout
+
+```bash
+sudo k3s kubectl rollout status deployment/gateway -n gateway
+```
+
+These commands are for observation and troubleshooting. Deleting pods, changing replica counts, modifying secrets, or applying Helm changes can affect the live deployment and should be done deliberately.
+
+## Known limitations and production boundary
+
+The current AWS environment is a demonstration deployment with a single EC2 host. The following limitations remain relevant.
+
+### Transport and public exposure
+
+- The dashboard is accessible through an HTTP nip.io hostname.
+- TLS has not been configured for the current public endpoint.
+- The hostname depends on the instance's public IP.
+- Public ingress, firewall rules, and access restrictions must be reviewed before exposing the service more broadly.
+
+### Availability and persistence
+
+- The Kubernetes cluster is hosted on a single EC2 instance.
+- Pod recreation is not equivalent to node-level high availability.
+- Persistent volumes are associated with the single-node environment.
+- Pod-replacement persistence was tested, but a complete backup-and-restore procedure has not been demonstrated by the tests listed here.
+- The gateway uses SQLite on persistent storage and is intended to run as a single replica in this deployment.
+
+### Images and releases
+
+- The current demonstration uses images imported into the k3s container runtime rather than a private image registry.
+- A repeatable image publishing and deployment pipeline has not been established by the deployment tests described here.
+- Helm upgrade and rollback have not been claimed as verified tests.
+
+### Secrets and operations
+
+- Secrets and encryption keys must be managed carefully and must not be committed to Git.
+- Production deployment would require a documented secret-rotation and recovery process.
+- Resource limits, monitoring, backups, incident response, and ongoing cost controls need further review.
+- The demo WooCommerce data and test credentials must not be treated as production data.
+
+### Before production use
+
+A production-oriented deployment should, at minimum:
+
+1. Configure HTTPS and validate certificate renewal.
+2. Review ingress exposure, security-group rules, and administrative access.
+3. Use a secure image registry and a repeatable deployment pipeline.
+4. Establish and test backup restoration for SQLite and store data.
+5. Define secret storage, rotation, and recovery procedures.
+6. Add monitoring, alerting, resource limits, and operational runbooks.
+7. Test upgrade and rollback procedures in a controlled environment.
+8. Perform a security review against the actual deployed configuration.
+
+## Documentation
+
+- [System design and trade-offs](docs/design.md)
+- [Threat model and residual risks](docs/threat-model.md)
+- [AWS deployment and operations](docs/aws-deployment.md)
+
+The design document explains the architecture and major decisions. The threat model documents security assumptions and residual risks. The AWS deployment document should contain the deployment-specific configuration, verification steps, and operational procedures for the current EC2 environment.
+
+## Project goal
+
+Urumi aims to make MCP-based tools easier for a team to operate through a single gateway, while centralizing access control, upstream integration, and auditability.
+
+The current AWS deployment demonstrates the core workflow with WooCommerce, Notes, and Utilities. Further work is needed before treating the service as production-ready.

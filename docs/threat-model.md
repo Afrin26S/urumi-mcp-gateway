@@ -1,158 +1,309 @@
-# Threat model
+# Threat Model
 
-## Scope and assumptions
+## 1. Scope and assumptions
 
-In scope are the gateway (`/mcp`, `/api`, dashboard, and chat agent), upstream MCP servers, the WooCommerce demo store, and Kubernetes configuration in this repository. The local cluster and host are treated as trusted demo infrastructure. Admins are trusted to register upstreams but may make mistakes. The LLM provider is external.
+This threat model covers:
 
-Local traffic uses HTTP. A public deployment would require an explicit TLS and access-control setup. This document is not a formal security audit.
+- The Urumi gateway, including `/mcp`, `/api`, the dashboard, and chat agent.
+- Upstream MCP servers: WooCommerce, Notes, and Utilities.
+- The WordPress and WooCommerce demonstration store.
+- Gateway SQLite state, audit records, and stored upstream credentials.
+- Kubernetes configuration in the repository.
+- Requests and results sent to the configured external language-model provider.
 
-## Assets
+The local cluster and host are treated as trusted demonstration infrastructure. Administrators are trusted to register upstreams but may make mistakes. The language-model provider is external.
 
-- Dashboard credentials and sessions.
-- Member API keys and role assignments.
+The current AWS deployment runs on a single EC2 instance with k3s and Traefik. Its public gateway hostname is `gateway.54.235.55.63.nip.io`, and its transport is HTTP without configured TLS.
+
+This document is not a formal security audit. Implementation controls, locally observed tests, and AWS deployment tests are distinguished where relevant.
+
+## 2. Assets
+
+The primary assets are:
+
+- Dashboard credentials, session cookies, and account identities.
+- Member API keys, roles, and permissions.
 - WooCommerce REST credentials and the Utilities bearer token.
 - Product, order, and customer data.
-- Upstream registry and gateway SQLite database.
-- Audit log.
-- LLM provider key, quota, and availability.
+- Upstream server registry and gateway SQLite database.
+- Audit log and user activity records.
+- Fernet encryption key used for stored upstream credentials.
+- Language-model provider key, quota, and availability.
+- Kubernetes Secrets, application configuration, and persistent volumes.
+- Availability of the gateway and its upstream services.
 
-## Trust boundaries
+## 3. Trust boundaries
 
-1. Browser/MCP client to gateway ingress.
+1. Browser or MCP client to gateway ingress.
 2. Gateway authentication and authorization.
-3. Gateway to each upstream.
-4. Gateway to the LLM provider.
+3. Gateway to each upstream MCP server.
+4. Gateway to the external language-model provider.
 5. Pod-to-pod connectivity across `gateway`, `mcp-servers`, and `store`.
-6. Administrator-controlled upstream registration and updates.
+6. Administrator-controlled upstream registration and configuration updates.
+7. Application state and credentials stored in SQLite, Kubernetes Secrets, and persistent volumes.
 
-## Threats and mitigations
+Each boundary requires its own controls. For example, a permission check does not replace transport encryption, and a NetworkPolicy does not encrypt traffic.
 
-### Stolen API key
+## 4. Threats, controls, and residual risks
 
-**Impact:** An attacker with an active key can act as that user within the user's permissions.
+### 4.1 Stolen API key
 
-**Controls:** Raw keys are shown only when created; the database stores SHA-256 hashes and a visible key prefix; authentication checks key/user state; keys can be revoked. A revoked key was tested and returned HTTP 401.
+**Impact:** An attacker with an active key may act as the associated user within that user's permissions.
 
-**Residual risk:** A stolen active key works until revoked. Use a separate key per client and revoke/rotate it after suspected exposure.
+**Controls:**
 
-### Member invokes an admin-only tool
+- Raw API keys are shown only when created.
+- Stored API keys use SHA-256 hashes and a visible prefix for identification.
+- Authentication checks key and user state.
+- Keys can be revoked.
+- A revoked-key test returned HTTP 401 in local testing.
 
-**Impact:** A member could try to create products or change order status.
+**Residual risk:** A stolen active key may be used until revoked. Create separate keys for different clients, avoid sharing them, and revoke or rotate them after suspected exposure.
 
-**Controls:** The gateway filters `woocommerce__create_product` and `woocommerce__update_order_status` from member discovery by default and separately checks permissions at call time. A member attempt to call an admin-only tool was denied and recorded in audit activity.
+### 4.2 Member invokes an admin-only tool
 
-**Residual risk:** This is a deny-list. A newly added tool may be member-visible unless it is explicitly restricted. Review permissions whenever tools change.
+**Impact:** A member might attempt to create products or change order status without authorization.
 
-### Cross-user API-key access
+**Controls:**
 
-**Impact:** One member might obtain or revoke another member's API key.
+- `woocommerce__create_product` and `woocommerce__update_order_status` are admin-only by default.
+- The gateway filters these tools from member discovery.
+- The gateway checks permissions again at call time.
+- A member attempt to invoke an admin-only tool was denied and recorded in audit activity during local testing.
 
-**Controls:** Key-management endpoints enforce ownership, with broader rights for admins. Members should only see and revoke their own keys.
+**Residual risk:** The current rule is a deny-list. A newly added tool may be available to members unless explicitly restricted. Review and test permissions whenever the tool set changes.
 
-**Residual risk:** Add regression tests for cross-user access as the API evolves.
+### 4.3 Cross-user API-key access
 
-### Shared upstream credentials and store data
+**Impact:** A member could attempt to view, manage, or revoke another member's API key.
 
-**Impact:** Members do not see the WooCommerce credential, but calls to member-visible tools execute using the gateway's shared upstream credential. A member may be able to read any orders/products exposed by those tools, not merely records belonging to that member.
+**Controls:**
 
-**Controls:** The gateway encrypts upstream credentials at rest and never returns them to clients; admin-only write tools are restricted; calls are audited; WooCommerce results are trimmed to limit unnecessary customer detail.
+- Key-management endpoints enforce ownership.
+- Administrative operations have broader permissions than member operations.
+- Members should only be able to view and revoke their own keys.
 
-**Residual risk:** Tool permissions are not record-level authorization. The upstream key is broader than each member needs. Do not use real customer data until least-privilege credentials or record-scoping rules are in place.
+**Residual risk:** Add and maintain regression tests for cross-user access as the API evolves. Do not rely solely on hiding controls in the dashboard.
 
-### Malicious upstream or prompt injection
+### 4.4 Shared upstream credentials and store data
 
-**Impact:** Tool descriptions or stored data can contain instructions designed to manipulate the model, leak context, or trigger unintended actions.
+**Impact:** Members do not receive the WooCommerce credential directly, but calls to member-visible tools execute using the gateway's shared upstream credential. A member may be able to read records exposed by those tools beyond records belonging to that member.
 
-**Controls:** Only admins can register servers; permissions are checked outside the model; calls have timeouts; the chat loop allows at most six model calls per question; each tool result passed back to the model is limited to 6,000 characters; the prompt tells the model to treat tool results as data; the dashboard exposes a tool trace.
+**Controls:**
 
-**Residual risk:** Prompt wording is not a security boundary. An admin's chat can use admin-authorized tools, and a confirmation step before every write is not currently claimed. Consider confirmation for consequential changes and validate arguments in application code.
+- Upstream credentials are encrypted at rest.
+- Credentials are not returned to clients.
+- Admin-only write tools are restricted by default.
+- Tool calls are audited.
+- WooCommerce results are trimmed to reduce unnecessary customer detail.
 
-### SSRF through an upstream URL
+**Residual risk:** Tool-level authorization is not record-level authorization. The upstream credential may grant broader access than any one member needs. Do not use real customer data until least-privilege credentials or record-scoping rules are in place.
 
-**Impact:** A registered URL could target loopback, cloud metadata, or other sensitive addresses.
+### 4.5 Malicious upstream or prompt injection
 
-**Controls:** URL validation requires HTTP/HTTPS and rejects resolved addresses classified as loopback, link-local, unspecified, multicast, or reserved when a server is registered or its URL updated. NetworkPolicies provide a separate network-level control.
+**Impact:** Tool descriptions, product data, order information, or other upstream content could contain instructions intended to manipulate the model, expose context, or trigger unintended actions.
 
-**Residual risk:** Registration-time validation cannot eliminate DNS rebinding, redirects, changed DNS answers, or every private/internal destination. Keep URL validation and NetworkPolicy testing separate; one does not replace the other.
+**Controls:**
 
-### Credential retained after a URL change
+- Only administrators can register upstream servers.
+- Authorization checks are performed outside the model.
+- Tool calls use timeouts.
+- The chat loop permits at most six model calls per question.
+- Individual tool results passed back to the model are limited to 6,000 characters.
+- The system prompt instructs the model to treat tool results as data rather than instructions.
+- The dashboard exposes a tool trace for inspection.
 
-**Impact:** If a stored credential is silently reused after an upstream URL changes, it could be sent to an unintended destination.
+**Residual risk:** Prompt wording is not a security boundary. An administrator's chat can use admin-authorized tools, and confirmation for consequential chat-initiated writes is not currently claimed as implemented. Validate tool arguments in application code and consider explicit confirmation before sensitive writes.
 
-**Controls:** Changing the URL of a credentialed upstream requires entering its credential again. A URL-only update was tested through the dashboard and rejected with HTTP 422; the original URL and Bearer-token configuration remained unchanged.
+### 4.6 SSRF through an upstream URL
 
-**Residual risk:** An administrator who knows the upstream credential can still configure another destination and enter that credential again. URL validation and NetworkPolicy/egress restrictions remain important independent controls.
-### Slow or unavailable upstream
+**Impact:** An upstream URL could target loopback, cloud metadata, or other sensitive addresses.
 
-**Impact:** A dead server could block tool discovery or chats.
+**Controls:**
 
-**Controls:** Tool discovery defaults to a 5-second timeout, calls to a 10-second timeout, and the discovery cache TTL to 10 seconds. Failed upstreams are marked unreachable and don't contribute tools to discovery. Scaling Notes to zero was tested: the dashboard marked it unreachable while Utilities and WooCommerce remained connected. Restoring Notes recovered it.
+- URL validation requires HTTP or HTTPS.
+- Validation rejects resolved addresses classified as loopback, link-local, unspecified, multicast, or reserved when an upstream is registered or its URL is updated.
+- NetworkPolicy manifests provide a separate network-level control.
 
-**Residual risk:** This is not a high-availability deployment. Cluster or gateway outages can interrupt all gateway-mediated work.
+**Residual risk:** Registration-time URL validation cannot eliminate every SSRF scenario. DNS rebinding, redirects, changes in DNS answers, and private/internal destinations require careful treatment. NetworkPolicies only help when their rules are correct and the cluster networking implementation enforces them.
 
-### Dashboard session theft or insecure transport
+Do not claim complete SSRF protection without testing the actual application and network behaviour.
 
-**Impact:** A stolen session can be used as the signed-in user; plain HTTP traffic can expose credentials or session data to a network observer.
+### 4.7 Credential retained after an upstream URL change
 
-**Controls:** Dashboard sessions are signed, have an eight-hour lifetime, and use an HttpOnly cookie with `SameSite=Lax`. The cookie's secure flag is configurable.
+**Impact:** If a stored credential were silently reused after a URL change, it could be sent to an unintended destination.
 
-**Residual risk:** Local development uses `cookieSecure: "false"`. Production should use HTTPS and set it to `"true"`. Review CSRF behavior and session invalidation before public exposure.
+**Controls:**
 
-### Kubernetes lateral movement and service-account tokens
+- Changing the URL of a credentialed upstream requires the credential to be entered again.
+- A URL-only update was tested through the local dashboard and rejected with HTTP 422.
+- The test left the original URL and Bearer-token configuration unchanged.
 
-**Impact:** A compromised pod may try to contact unrelated services or use a mounted Kubernetes API token.
+**Residual risk:** An administrator who knows the upstream credential can still configure a different destination and enter the credential again. URL validation and egress restrictions remain separate controls.
 
-**Controls:** NetworkPolicy manifests exist in all three charts. Pod templates disable service-account-token automounting. Gateway, Notes, Utilities, and WooCommerce MCP are configured to run as UID 10001, with privilege escalation disabled and Linux capabilities dropped. WordPress and MariaDB also disable token automounting but retain their upstream image users.
+### 4.8 Slow or unavailable upstream
 
-**Residual risk:** Effective isolation depends on selectors, CNI enforcement, and allowed traffic rules. Do not claim every unauthorized connection is blocked without completed negative tests. NetworkPolicies do not encrypt traffic.
+**Impact:** An unavailable server could delay discovery or prevent a chat request from completing.
 
-### LLM key and cost abuse
+**Controls:**
 
-**Impact:** A leaked provider key or excessive chat requests could consume quota or incur costs.
+- Default tool-list timeout: 5 seconds.
+- Default tool-call timeout: 10 seconds.
+- Default tool-list cache TTL: 10 seconds.
+- Failed upstreams are marked unreachable and contribute no tools to discovery.
+- Other upstreams can remain available when one upstream fails.
 
-**Controls:** The provider key is supplied through a Kubernetes Secret; the agent has a bounded tool loop and result-size cap.
+**Observed tests:**
 
-**Residual risk:** Comprehensive per-user rate limiting and spend controls are not claimed as implemented. Use provider budgets/alerts and add request rate limits before broader deployment.
+- Locally, disabling Utilities removed its tools from discovery; re-enabling it restored the full set of 11 tools.
+- On AWS, scaling Notes to zero caused the dashboard to mark it unreachable while Utilities and WooCommerce remained connected. Restoring Notes recovered the three connected upstreams and 11 tools.
 
-### Database and encryption-key exposure
+**Residual risk:** These tests cover specific upstream failures. They do not establish high availability. Failure of the gateway, EC2 instance, cluster networking, or shared storage may interrupt all gateway-mediated work.
 
-**Impact:** A database copy can expose account/server/audit records; a database and Fernet key together can expose encrypted upstream credentials.
+### 4.9 Dashboard session theft and insecure transport
 
-**Controls:** Passwords use Argon2 hashes, API keys are SHA-256 hashed, upstream credentials are Fernet encrypted, and gateway state lives on persistent storage.
+**Impact:** A stolen session can be used as the signed-in user. Plain HTTP may expose credentials, session data, or other traffic to a network observer.
 
-**Residual risk:** Anyone who obtains both the database and encryption key may decrypt upstream credentials. Restrict and back up the key separately. SQLite on one volume is not a high-availability database.
+**Controls:**
 
-### Data sent to the model provider
+- Dashboard sessions are signed.
+- Sessions have an eight-hour lifetime.
+- Cookies use HttpOnly and `SameSite=Lax`.
+- The cookie's secure flag is configurable.
 
-**Impact:** Tool results can include store information sent to the configured external model provider.
+**Residual risk:**
 
-**Controls:** WooCommerce responses are trimmed and the LLM key is not exposed to the browser.
+- Local development uses `cookieSecure: "false"`.
+- The current AWS dashboard also uses HTTP without configured TLS.
+- Production requires HTTPS and secure-cookie configuration.
+- Review CSRF behaviour, session invalidation, and ingress access controls before public exposure.
 
-**Residual risk:** Returned names, items, and totals may still be sent to the provider. Avoid real customer data and review provider data handling before using production records.
+### 4.10 Kubernetes lateral movement and service-account tokens
 
-## Why client keys are not forwarded upstream
+**Impact:** A compromised pod could try to access unrelated services, databases, or the Kubernetes API.
 
-A Urumi API key authenticates a user to Urumi. Forwarding it upstream would ask a server to trust a token it did not issue, spread a gateway credential into another trust boundary, and allow a compromised upstream to capture a token usable against Urumi. Instead, Urumi authenticates the user, enforces the user's permissions, and authenticates itself to each upstream with that upstream's own credential.
+**Controls:**
 
-## Verification performed
+- NetworkPolicy manifests exist in the `gateway`, `mcp-servers`, and `store` charts.
+- Pod templates disable service-account-token automounting.
+- Gateway, Notes, Utilities, and WooCommerce MCP are configured to run as UID 10001, with privilege escalation disabled and Linux capabilities dropped.
+- WordPress and MariaDB also disable token automounting but retain their upstream image runtime users.
+- The WordPress bootstrap job uses UID 33 to match file ownership.
 
-Observed local results:
-- A revoked API key returned HTTP 401.
-- Member discovery exposed nine tools; the two default admin-only WooCommerce tools were excluded.
-- A member's admin-only tool call was denied and appeared in audit activity.
-- Disabling Utilities removed its tools from discovery; re-enabling it restored all 11 tools.
-- Scaling Notes to zero showed it unreachable while the other upstreams remained connected; scaling Notes back up recovered it.
-- Audit activity showed user attribution and chat tool calls.
-- Source inspection confirmed the configured non-root and capability restrictions for gateway, Notes, Utilities, and WooCommerce MCP, and service-account-token automounting is disabled in the relevant templates. Source inspection is not a penetration test.
+**Residual risk:** Effective isolation depends on policy selectors, allowed traffic rules, and CNI enforcement. The existence of a NetworkPolicy does not prove every unauthorized connection is blocked. Do not claim complete isolation without observed positive and negative network tests.
 
-Only add claims about other security tests (such as specific SSRF payloads or every NetworkPolicy-denial scenario) after actually running and observing them.
+NetworkPolicies do not encrypt traffic.
 
-## Highest-priority future work
+### 4.11 Language-model key and cost abuse
 
-1. Complete TLS/cert-manager setup and enable secure cookies.
+**Impact:** A leaked provider key or excessive chat usage could consume quota or incur costs.
+
+**Controls:**
+
+- The provider key is supplied through Kubernetes Secret configuration.
+- The chat agent has a bounded tool loop.
+- Individual tool results passed back to the model are size-limited.
+
+**Residual risk:** Comprehensive per-user rate limiting and spend controls are not claimed as implemented. Use provider budgets and alerts, restrict access to Secrets, and add application-level request limits before broader deployment.
+
+### 4.12 Database and encryption-key exposure
+
+**Impact:** A database copy may expose account, server-registry, and audit records. A database copy together with the Fernet key could expose encrypted upstream credentials.
+
+**Controls:**
+
+- Passwords use Argon2 hashes.
+- API keys are stored as SHA-256 hashes.
+- Upstream credentials are encrypted with Fernet.
+- Gateway state is stored on persistent storage.
+- The gateway pod-replacement test showed previously recorded audit entries remained visible.
+
+**Residual risk:**
+
+- Anyone who obtains both the database and its encryption key may decrypt stored upstream credentials.
+- Protect the encryption key separately from database backups.
+- Define and test backup restoration.
+- SQLite on a single volume is not a high-availability database.
+
+The AWS test demonstrated persistence across a gateway pod replacement, not recovery after volume loss or database corruption.
+
+### 4.13 Data sent to the model provider
+
+**Impact:** Tool results may contain product, order, or customer information that is sent to the configured external model provider.
+
+**Controls:**
+
+- WooCommerce responses are trimmed.
+- The language-model provider key is not exposed to the browser.
+- The gateway controls the tool-routing path.
+
+**Residual risk:** Returned names, order items, totals, and other data may still be sent to the provider. Avoid real customer data in the demonstration and review the provider's data-handling terms before using production records.
+
+### 4.14 Single-node deployment and public exposure
+
+**Impact:** A host failure, public endpoint exposure, or compromised EC2 instance could interrupt the entire service or expose its data and credentials.
+
+**Controls and observed configuration:**
+
+- The AWS demonstration runs on a single EC2 instance with k3s.
+- Traefik provides ingress.
+- Kubernetes recreates a deleted gateway pod.
+- The gateway dashboard is reachable through the current nip.io hostname.
+
+**Residual risk:**
+
+- Pod recovery does not protect against EC2 or node failure.
+- The current public gateway uses HTTP without configured TLS.
+- The hostname depends on the public IP.
+- A complete backup-and-restore procedure and node-level high-availability design have not been demonstrated.
+
+Review security-group rules, ingress exposure, administrative access, storage protection, and cost controls before leaving the environment running or exposing it more broadly.
+
+## 5. Why client keys are not forwarded upstream
+
+A Urumi API key authenticates a user to Urumi. Forwarding that key upstream would ask another server to trust a token it did not issue, spread a gateway credential across a different trust boundary, and allow a compromised upstream to capture a token that may be usable against Urumi.
+
+Instead, Urumi authenticates the user, enforces the user's permissions, and authenticates itself to each upstream using that upstream's own credential.
+
+This separation limits unnecessary credential sharing and centralizes authorization and auditability.
+
+## 6. Verification performed
+
+The following results were observed during local testing or on the AWS demonstration deployment.
+
+| Test | Environment | Observed result |
+|---|---|---|
+| Revoked API key | Local | Returned HTTP 401 |
+| Member tool discovery | Local | Excluded the two default admin-only WooCommerce tools |
+| Member calls admin-only tool | Local | Denied and recorded in audit activity |
+| Disable and restore Utilities | Local | Its tools disappeared from and returned to discovery; the full set contained 11 tools after recovery |
+| URL-only change for credentialed upstream | Local | Rejected with HTTP 422 |
+| Notes upstream outage and recovery | AWS | Notes became unreachable; restoring it returned the dashboard to three connected upstreams and 11 tools |
+| Gateway pod replacement | AWS | Kubernetes recreated the pod; prior audit entries remained visible |
+| MariaDB pod replacement | AWS | The database pod returned and five existing WooCommerce products remained available |
+| Cross-server chat | AWS | Chat called WooCommerce order retrieval and Utilities currency conversion in one request |
+
+Source inspection also confirmed the configured non-root execution and capability restrictions for gateway, Notes, Utilities, and WooCommerce MCP, and disabled service-account-token automounting in the relevant templates. Source inspection is not a penetration test.
+
+The currency-conversion test returned `22000` from the Utilities tool for an input amount of USD 250, and the chat displayed `22,000 INR`. This verifies the observed tool flow and response, not a live exchange rate.
+
+Only claim additional security tests—such as specific SSRF payloads, complete NetworkPolicy-denial scenarios, TLS verification, or backup restoration—after running and observing them.
+
+## 7. Highest-priority future work
+
+1. Configure TLS and cert-manager, enable secure cookies, and review session and CSRF behaviour.
 2. Require confirmation for consequential chat-initiated writes.
 3. Consider allow-list permissions and per-user rate limits.
-4. Audit management actions; define audit retention and backup/restore procedures.
+4. Audit management actions and define audit retention.
 5. Tighten gateway egress and test NetworkPolicy enforcement.
-6. Move to PostgreSQL before scaling gateway replicas.
-7. Review WooCommerce authentication/forwarded-HTTPS behavior before handling real customer data.
+6. Establish and test backup and restore procedures for gateway and store data.
+7. Move to PostgreSQL before scaling gateway replicas.
+8. Review WooCommerce authentication and forwarded-HTTPS assumptions before handling real customer data.
+9. Add monitoring, alerting, provider cost controls, and operational recovery procedures.
+10. Establish a repeatable image publishing and deployment pipeline and test Helm upgrades and rollbacks.
+
+## Related documentation
+
+- [README](../README.md)
+- [System design and trade-offs](design.md)
+- [AWS deployment and operations](aws-deployment.md)
