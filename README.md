@@ -1,5 +1,7 @@
 ﻿# Urumi MCP Gateway
 
+ Demo Video-[https://youtu.be/QCaeMll1rcM?si=6u7mNBN-fhs8M6j0]
+
 **A Kubernetes-hosted MCP gateway for secure, auditable access to team tools and data sources.**
 
 Urumi gives a team one central place to connect Model Context Protocol (MCP) servers, manage access to their tools, and use those tools through a dashboard chat agent. WooCommerce is the first business data source, supported by two demonstration MCP servers: Notes and Utilities.
