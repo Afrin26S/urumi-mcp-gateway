@@ -302,6 +302,23 @@ def delete_server(server_id: int, _: dict = Depends(admin_only)):
 
 
 # ---------- audit log (admin) ----------
+@api.get("/audit")
+async def audit_log(limit: int = 200, _: dict = Depends(admin_only)):
+    limit = min(max(limit, 1), 500)
+
+    rows = await asyncio.to_thread(
+        db.query,
+        """
+        SELECT id, ts, user_id, user_email, source, server_slug,
+               tool, duration_ms, outcome, error
+        FROM audit_log
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return rows
+
 
 # ---------- metrics (admin) ----------
 @api.get("/metrics")
